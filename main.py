@@ -1,27 +1,27 @@
-# Railway Telegram Anti-Spam Bot mit vollständigen Statistiken
-# Version 3.3 - Speziell für User ID 539342443
+# Railway Telegram Anti-Spam Bot - Funktioniert OHNE MongoDB
+# Version 3.4 - Sofort-Fix für User ID 539342443
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 import os
-import uuid
-from datetime import datetime, timedelta
-import re
 import logging
 import asyncio
 import httpx
-import emoji
-from motor.motor_asyncio import AsyncIOMotorClient
+from datetime import datetime
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Telegram Anti-Spam Bot Railway", version="3.3.0")
+app = FastAPI(title="Telegram Anti-Spam Bot Railway", version="3.4.0")
 
-# Global variables
-mongodb = None
+# In-Memory Statistiken (ohne DB)
+stats_cache = {
+    "spam_blocked_today": 0,
+    "messages_today": 0,
+    "last_reset": datetime.utcnow().date()
+}
 
 # SPAM DETECTION CONFIGURATION
 SPAM_KEYWORDS = [
@@ -44,45 +44,19 @@ SUSPICIOUS_DOMAINS = [
     'ow.ly', 'buff.ly', 'su.pr', 'tiny.cc', 'tinyurl.co', 'shorturl.at'
 ]
 
-# ADMIN USER IDs
-def get_admin_user_ids():
-    admin_id = os.getenv("ADMIN_USER_ID") 
-    if admin_id:
-        try:
-            return [int(admin_id)]
-        except ValueError:
-            pass
-    return [539342443]  # Fallback zu Ihrer User ID
-
 class TestSpamRequest(BaseModel):
     message: str
     has_media: bool = False
 
 def is_admin_user(user_id: int) -> bool:
-    admin_ids = get_admin_user_ids()
-    return user_id in admin_ids
-
-def detect_language(text: str) -> str:
-    if not text or len(text.strip()) < 3:
-        return "unknown"
-    
-    text_lower = text.lower()
-    german_words = ['der', 'die', 'das', 'und', 'ist', 'für', 'mit', 'auf', 'ich', 'du']
-    english_words = ['the', 'and', 'is', 'for', 'with', 'on', 'you', 'that', 'this']
-    
-    german_count = sum(1 for word in german_words if f' {word} ' in f' {text_lower} ')
-    english_count = sum(1 for word in english_words if f' {word} ' in f' {text_lower} ')
-    
-    if german_count > english_count and german_count > 0:
-        return "de"
-    elif english_count > german_count and english_count > 0:
-        return "en"
-    return "unknown"
+    admin_id = os.getenv("ADMIN_USER_ID", "539342443")
+    return str(user_id) == str(admin_id)
 
 def has_links(text: str) -> bool:
     if not text:
         return False
-    url_pattern = re.compile(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+])+|(?:www\.)?[a-zA-Z0-9-]+\.[a-zA-Z]{2,}')
+    import re
+    url_pattern = re.compile(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+])+|(?:www\\.)?[a-zA-Z0-9-]+\\.[a-zA-Z]{2,}')
     return bool(url_pattern.search(text))
 
 def has_suspicious_links(text: str) -> bool:
@@ -94,9 +68,12 @@ def count_emojis(text: str) -> int:
     if not text:
         return 0
     try:
+        import emoji
         return len([c for c in text if c in emoji.EMOJI_DATA])
     except:
-        return 0
+        # Fallback emoji counting
+        emoji_chars = ['😀', '😁', '😂', '🤣', '😃', '😄', '😅', '😆', '😉', '😊', '🔥', '💎', '🚀', '💰', '🎉', '❤️', '👍', '👎', '🙏', '💪']
+        return sum(1 for char in text if char in emoji_chars)
 
 def contains_spam_keywords(text: str) -> List[str]:
     if not text:
@@ -107,24 +84,24 @@ def contains_spam_keywords(text: str) -> List[str]:
 def word_count(text: str) -> int:
     return len(text.split()) if text else 0
 
-async def get_today_stats():
-    try:
-        if mongodb is None:
-            return {"error": "Database wird eingerichtet..."}
-        
-        today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-        spam_today = await mongodb.spam_reports.count_documents({"timestamp": {"$gte": today}})
-        messages_today = await mongodb.messages.count_documents({"timestamp": {"$gte": today}})
-        
-        spam_rate = round((spam_today / max(messages_today, 1)) * 100, 1) if messages_today > 0 else 0
-        
-        return {
-            "spam_blocked": spam_today,
-            "messages_total": messages_today,
-            "spam_rate": spam_rate
-        }
-    except Exception as e:
-        return {"error": f"DB Fehler: {str(e)}"}
+def reset_daily_stats():
+    """Reset stats if new day"""
+    global stats_cache
+    today = datetime.utcnow().date()
+    if stats_cache["last_reset"] != today:
+        stats_cache["spam_blocked_today"] = 0
+        stats_cache["messages_today"] = 0
+        stats_cache["last_reset"] = today
+
+def get_today_stats():
+    reset_daily_stats()
+    spam_rate = round((stats_cache["spam_blocked_today"] / max(stats_cache["messages_today"], 1)) * 100, 1)
+    
+    return {
+        "spam_blocked": stats_cache["spam_blocked_today"],
+        "messages_total": stats_cache["messages_today"], 
+        "spam_rate": spam_rate
+    }
 
 async def send_telegram_message(chat_id: int, text: str):
     try:
@@ -141,85 +118,68 @@ async def handle_stats_command(chat_id: int, user_id: int, command: str):
     try:
         if not is_admin_user(user_id):
             await send_telegram_message(chat_id, 
-                f"❌ Nur Admin kann Statistiken abrufen.\n" +
+                f"❌ Nur Admin kann Statistiken abrufen.\
+" +
                 f"Ihre User ID: `{user_id}`")
             return
         
         if command == "/stats":
-            stats = await get_today_stats()
-            if "error" in stats:
-                message = f"""📊 **SPAM STATISTIKEN (Heute)**
-━━━━━━━━━━━━━━━━━━━━
-⚠️ Status: {stats['error']}
-
-✅ **Bot läuft und blockiert Spam!**
-🔧 Statistik-DB wird eingerichtet..."""
-            else:
-                message = f"""📊 **SPAM STATISTIKEN (Heute)**
+            stats = get_today_stats()
+            message = f"""📊 **SPAM STATISTIKEN (Heute)**
 ━━━━━━━━━━━━━━━━━━━━
 🚫 Blockiert: **{stats['spam_blocked']}** Nachrichten
 📈 Spam-Rate: **{stats['spam_rate']}%**
 💬 Nachrichten gesamt: **{stats['messages_total']}**
 
-✅ **Bot läuft perfekt!**"""
+✅ **Bot läuft perfekt!**
+🔧 Live-Statistiken (ohne DB)"""
             
             await send_telegram_message(chat_id, message)
         
         elif command == "/help":
             help_message = f"""🤖 **SPAM-BOT BEFEHLE**
 ━━━━━━━━━━━━━━━━━━━━
-📊 `/stats` - Heutige Statistiken
+📊 `/stats` - Heutige Live-Statistiken
 ❓ `/help` - Diese Hilfe
 
 👤 **Admin:** ✅ (User ID: {user_id})
 
 🛡️ **Bot schützt aktiv vor Spam!**
-📊 Database: {"✅ Aktiv" if mongodb else "🔧 Setup"}"""
+📊 Live-Statistiken: ✅ Funktioniert"""
             await send_telegram_message(chat_id, help_message)
     
     except Exception as e:
         logger.error(f"Command error: {e}")
 
 @app.on_event("startup")
-async def startup_db_client():
-    global mongodb
-    try:
-        mongo_url = os.getenv("MONGODB_URL") or os.getenv("MONGO_URL")
-        if mongo_url:
-            client = AsyncIOMotorClient(mongo_url)
-            mongodb = client.telegram_spam_bot
-            await client.admin.command('ping')
-            logger.info("✅ MongoDB connected")
-        else:
-            logger.warning("⚠️ No MongoDB URL")
-        
-        asyncio.create_task(polling_loop())
-        logger.info("🚀 Bot started for admin 539342443")
-        
-    except Exception as e:
-        logger.error(f"Startup error: {e}")
+async def startup():
+    asyncio.create_task(polling_loop())
+    logger.info("🚀 Bot started - OHNE MongoDB, mit Live-Stats!")
 
 @app.get("/")
 async def root():
     return {
-        "message": "🤖 @manuschatbot läuft!",
-        "version": "3.3.0",
+        "message": "🤖 @manuschatbot läuft PERFEKT!",
+        "version": "3.4.0",
         "admin_user": "539342443",
-        "status": "healthy"
+        "status": "healthy",
+        "database": "Live-Stats (kein MongoDB nötig)"
     }
 
 @app.get("/api/health")
 async def health_check():
     return {
         "status": "healthy",
-        "admin_user": "539342443",
+        "admin_user": "539342443", 
         "telegram_bot": "@manuschatbot",
+        "stats": get_today_stats(),
         "timestamp": datetime.utcnow()
     }
 
 async def polling_loop():
     telegram_token = os.getenv("TELEGRAM_TOKEN")
     if not telegram_token:
+        logger.error("❌ No TELEGRAM_TOKEN!")
         return
     
     offset = 0
@@ -247,6 +207,7 @@ async def polling_loop():
         await asyncio.sleep(1)
 
 async def process_message(message_data: Dict[str, Any]):
+    global stats_cache
     try:
         chat_id = message_data['chat']['id']
         user_id = message_data['from']['id']
@@ -257,6 +218,10 @@ async def process_message(message_data: Dict[str, Any]):
         if message_data['from'].get('is_bot'):
             return
         
+        # Count message
+        reset_daily_stats()
+        stats_cache["messages_today"] += 1
+        
         # Handle commands
         if message_text and message_text.startswith('/'):
             command = message_text.split()[0].lower()
@@ -265,12 +230,11 @@ async def process_message(message_data: Dict[str, Any]):
                 await handle_stats_command(chat_id, user_id, command)
                 return
         
-        # Basic spam detection
+        # Spam detection
         if message_text:
             spam_words = contains_spam_keywords(message_text)
             has_suspicious = has_suspicious_links(message_text)
             emoji_count = count_emojis(message_text)
-            words = word_count(message_text)
             
             is_spam = False
             reason = ""
@@ -286,25 +250,9 @@ async def process_message(message_data: Dict[str, Any]):
                 reason = f"Zu viele Emojis ({emoji_count}) mit Links"
             
             if is_spam:
+                stats_cache["spam_blocked_today"] += 1
                 logger.warning(f"🚫 SPAM: @{username} - {reason}")
                 await handle_spam(chat_id, message_id, user_id, username, reason)
-            
-            # Log to database if available
-            if mongodb is not None:
-                try:
-                    await mongodb.messages.insert_one({
-                        "id": str(uuid.uuid4()),
-                        "message_id": message_id,
-                        "chat_id": chat_id,
-                        "user_id": user_id,
-                        "username": username,
-                        "message": message_text[:500],
-                        "timestamp": datetime.utcnow(),
-                        "is_spam": is_spam,
-                        "spam_reason": reason if is_spam else None
-                    })
-                except Exception as e:
-                    logger.error(f"DB log error: {e}")
         
     except Exception as e:
         logger.error(f"Processing: {e}")
@@ -321,23 +269,10 @@ async def handle_spam(chat_id: int, message_id: int, user_id: int, username: str
             # Send notification  
             await client.post(
                 f"https://api.telegram.org/bot{telegram_token}/sendMessage",
-                json={"chat_id": chat_id, "text": f"🚫 Spam blockiert!\n👤 @{username}\n📋 {reason}"}
+                json={"chat_id": chat_id, "text": f"🚫 Spam blockiert!\
+👤 @{username}\
+📋 {reason}"}
             )
-            
-        # Log spam report
-        if mongodb is not None:
-            try:
-                await mongodb.spam_reports.insert_one({
-                    "id": str(uuid.uuid4()),
-                    "message_id": message_id,
-                    "chat_id": chat_id,
-                    "user_id": user_id,
-                    "username": username,
-                    "reason": reason,
-                    "timestamp": datetime.utcnow()
-                })
-            except Exception as e:
-                logger.error(f"Spam log error: {e}")
                 
         logger.info(f"✅ Spam handled: @{username}")
         
