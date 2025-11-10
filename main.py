@@ -1,6 +1,7 @@
 # Railway Telegram Anti-Spam Bot mit AI-POWERED Detection
-# Version 5.1 - AI + CAPTCHA + Enhanced Protection + Channel Message Detection
+# Version 5.2 - AI + CAPTCHA + Enhanced Protection + Channel Message Detection + Aggressive Scam Detection
 # FIX: Erkennt jetzt Kanal-Nachrichten in verknüpften Diskussionsgruppen (sender_chat)
+# NEW: Verbesserte Promo-Code Erkennung, niedrigere Emoji-Schwelle, mehr Scam-Keywords
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -28,7 +29,7 @@ mongodb_available = False
 # AI Configuration
 AI_ENABLED = True
 OPENAI_MODEL = "gpt-4o-mini"  # Cost-effective model
-AI_SPAM_THRESHOLD = 6  # Score 6+ = Spam
+AI_SPAM_THRESHOLD = 5  # Score 5+ = Spam (gesenkt für bessere Erkennung)
 
 # CAPTCHA & User Verification System
 user_verification = {}  # In-memory storage für user verification status
@@ -68,7 +69,11 @@ SPAM_KEYWORDS = [
     'scam', 'legit', 'proof', 'promo', 'code', 'cashout', 'cash out', 'e-wallet',
     'literally', 'shaking', 'tried it', 'signed up', 'send me', 'sent me',
     'get this', 'managed to', 'right after', 'just', 'minutes', 'friends thought',
-    'saw the proof', 'get it while', 'while it', 'hot', 'everyone'
+    'saw the proof', 'get it while', 'while it', 'hot', 'everyone',
+    # NEUE SCAM KEYWORDS V5.2
+    'registration bonus', 'skeptical', 'mindblown', 'drake', 'drakist', 
+    'didn\'t believe', 'managed to withdraw', 'arrived in', 'recommending',
+    'promotion is still active', 'gave me', 'the best part', 'try it', 'thank you so much'
 ]
 
 SUSPICIOUS_DOMAINS = [
@@ -235,6 +240,21 @@ def has_money_symbols(text: str) -> bool:
         return False
     money_symbols = ['$', '€', '£', '¥', '₿', '💰', '💵', '💴', '💶', '💷']
     return any(symbol in text for symbol in money_symbols)
+
+def has_promo_code_pattern(text: str) -> bool:
+    """Check if text contains promo code patterns"""
+    if not text:
+        return False
+    text_lower = text.lower()
+    # Promo code indicators
+    promo_indicators = ['code:', 'promo:', 'promocode:', 'coupon:', 'referral:']
+    # Check for pattern like "Code: xyz" or "promo=xyz"
+    if any(indicator in text_lower for indicator in promo_indicators):
+        return True
+    # Check for "promo=" pattern in links
+    if 'promo=' in text_lower or '?code=' in text_lower or '?promo=' in text_lower:
+        return True
+    return False
 
 # CAPTCHA & USER VERIFICATION FUNCTIONS
 async def is_user_verified(user_id: int, chat_id: int) -> bool:
@@ -598,11 +618,11 @@ async def startup_db_client():
 async def root():
     return {
         "message": "🤖 @manuschatbot läuft PERFEKT mit CAPTCHA!",
-        "version": "5.1.0",
+        "version": "5.2.0",
         "admin_user": "539342443",
         "status": "healthy",
         "mongodb_available": mongodb_available,
-        "features": ["Spam Detection", "CAPTCHA System", "Admin Commands", "Channel Message Detection"]
+        "features": ["Spam Detection", "CAPTCHA System", "Admin Commands", "Channel Message Detection", "Aggressive Scam Detection"]
     }
 
 @app.get("/api/health")
@@ -753,6 +773,7 @@ async def process_message(message_data: Dict[str, Any]):
             has_suspicious = has_suspicious_links(message_text)
             emoji_count = count_emojis(message_text)
             has_money_symbols_detected = has_money_symbols(message_text)
+            has_promo_pattern = has_promo_code_pattern(message_text)
             words_total = word_count(message_text)
             has_url_links = has_links(message_text)
             
@@ -761,16 +782,22 @@ async def process_message(message_data: Dict[str, Any]):
             detection_method = "rule"
             ai_analysis = None
             
-            # RULE-BASED DETECTION (Fast check first)
+            # RULE-BASED DETECTION (Fast check first) - V5.2 ENHANCED
             if has_suspicious:
                 is_spam = True
                 reason = "Verdächtige URL erkannt"
             elif len(spam_words) >= 3:
                 is_spam = True
                 reason = f"Spam Keywords: {', '.join(spam_words[:3])}"
-            elif has_money_symbols_detected and has_url_links and emoji_count > 5:
+            elif has_promo_pattern and has_url_links:
+                is_spam = True
+                reason = "Promo-Code + Link erkannt (klassischer Scam)"
+            elif has_money_symbols_detected and has_url_links and emoji_count > 2:
                 is_spam = True
                 reason = "Geld-Symbole + Links + Emojis (klassischer Scam)"
+            elif has_money_symbols_detected and len(spam_words) >= 2:
+                is_spam = True
+                reason = "Geld-Symbole + Spam-Keywords (Finanz-Scam)"
             
             # AI ANALYSIS (For uncertain cases)
             if not is_spam and should_use_ai_analysis(message_text, has_url_links, emoji_count, spam_words):
