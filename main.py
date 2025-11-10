@@ -1,5 +1,5 @@
 # Railway Telegram Anti-Spam Bot mit AI-POWERED Detection
-# Version 5.0 - AI + CAPTCHA + Enhanced Protection
+# Version 5.0 - AI + CAPTCHA + Enhanced Protection + Channel Fix
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -574,7 +574,9 @@ async def handle_stats_command(chat_id: int, user_id: int, command: str):
 
 💾 Datenbank: {db_status}
 🤖 AI-System: {ai_status}
-💡 Model: {OPENAI_MODEL}"""
+💡 Model: {OPENAI_MODEL}
+
+⚠️ **NUR für Telegram-Gruppen!**"""
             await send_telegram_message(chat_id, help_message)
     
     except Exception as e:
@@ -603,7 +605,8 @@ async def root():
         "mongodb_available": mongodb_available,
         "ai_enabled": AI_ENABLED,
         "ai_model": OPENAI_MODEL,
-        "features": ["AI Spam Detection", "CAPTCHA System", "Media Protection", "Financial Scam Detection"]
+        "channel_safe": True,
+        "features": ["AI Spam Detection", "CAPTCHA System", "Media Protection", "Financial Scam Detection", "Channel-Safe Operation"]
     }
 
 @app.get("/api/health")
@@ -618,6 +621,7 @@ async def health_check():
         "ai_model": OPENAI_MODEL,
         "captcha_enabled": True,
         "enhanced_scam_protection": True,
+        "channel_safe": True,
         "stats": stats,
         "timestamp": datetime.utcnow()
     }
@@ -660,6 +664,12 @@ async def process_message(message_data: Dict[str, Any]):
         username = message_data['from'].get('username', f"user_{user_id}")
         message_text = message_data.get('text') or message_data.get('caption', '')
         message_id = message_data['message_id']
+        
+        # Check if this is a channel (not group) - Skip processing
+        chat_type = message_data['chat'].get('type', 'private')
+        if chat_type == 'channel':
+            logger.warning(f"⚠️ Bot running in channel {chat_id} - Skipping processing to avoid interference")
+            return
         
         if message_data['from'].get('is_bot'):
             return
