@@ -1,5 +1,5 @@
-# Railway Telegram Anti-Spam Bot mit CAPTCHA System
-# Version 4.0 - CAPTCHA für neue User + MongoDB Integration
+# Railway Telegram Anti-Spam Bot mit AI-POWERED Detection
+# Version 5.0 - AI + CAPTCHA + Enhanced Protection
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -11,17 +11,23 @@ import asyncio
 import httpx
 import re
 import random
+import json
 from datetime import datetime, timedelta
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Telegram Anti-Spam Bot Railway", version="4.0.0")
+app = FastAPI(title="AI-Powered Telegram Anti-Spam Bot", version="5.0.0")
 
 # Global variables
 mongodb = None
 mongodb_available = False
+
+# AI Configuration
+AI_ENABLED = True
+OPENAI_MODEL = "gpt-4o-mini"  # Cost-effective model
+AI_SPAM_THRESHOLD = 6  # Score 6+ = Spam
 
 # CAPTCHA & User Verification System
 user_verification = {}  # In-memory storage für user verification status
@@ -39,10 +45,12 @@ fallback_stats = {
     "messages_today": 0,
     "captcha_solved_today": 0,
     "captcha_failed_today": 0,
+    "ai_detections_today": 0,
+    "rule_detections_today": 0,
     "last_reset": datetime.utcnow().date()
 }
 
-# SPAM DETECTION CONFIGURATION
+# ENHANCED SPAM DETECTION CONFIGURATION
 SPAM_KEYWORDS = [
     'pump', 'pumpfun', 'airdrop', 'claim', 'bonus', 'solana', 'usdt', 'sol',
     'prove', 'tokens', 'allocated', 'eligible', 'wallets', 'distributed',
@@ -54,7 +62,12 @@ SPAM_KEYWORDS = [
     'limited', 'expire', 'urgent', 'immediate', 'instant', 'quick', 'fast', 'now',
     'hurry', 'act now', 'register', 'sign up', 'join', 'activate', 'redeem',
     'visit', 'website', 'click here', 'official', 'welcome', 'honor', 'launch',
-    'telegram bot', 'trading bot', 'bot for trading', 'get from', 'can get'
+    'telegram bot', 'trading bot', 'bot for trading', 'get from', 'can get',
+    # FINANCIAL SCAM KEYWORDS - NEU!
+    'scam', 'legit', 'proof', 'promo', 'code', 'cashout', 'cash out', 'e-wallet',
+    'literally', 'shaking', 'tried it', 'signed up', 'send me', 'sent me',
+    'get this', 'managed to', 'right after', 'just', 'minutes', 'friends thought',
+    'saw the proof', 'get it while', 'while it', 'hot', 'everyone'
 ]
 
 SUSPICIOUS_DOMAINS = [
@@ -101,6 +114,126 @@ def contains_spam_keywords(text: str) -> List[str]:
 
 def word_count(text: str) -> int:
     return len(text.split()) if text else 0
+
+# AI-POWERED SPAM DETECTION FUNCTIONS
+async def analyze_message_with_ai(message_text: str, username: str, chat_context: str = "") -> Dict[str, Any]:
+    """Analyze message using OpenAI for intelligent spam detection"""
+    try:
+        if not AI_ENABLED or not message_text:
+            return {"ai_score": 0, "ai_reason": "AI disabled or no text", "confidence": 0}
+        
+        openai_api_key = os.getenv("OPENAI_API_KEY")
+        if not openai_api_key:
+            logger.error("❌ OpenAI API Key not found!")
+            return {"ai_score": 0, "ai_reason": "No API key", "confidence": 0}
+        
+        # AI Prompt for spam detection
+        system_prompt = """Du bist ein Experte für Spam-Erkennung in deutschen Telegram-Gruppen. 
+        
+BEWERTE jede Nachricht auf einer Skala von 1-10 (10 = definitiv Spam).
+
+SPAM-INDIKATOREN:
+• Finanzielle Scams (Geld, Gewinne, "free money", Promo-Codes)
+• Verdächtige Links oder URLs
+• Übermäßige Emojis mit kommerziellen Inhalten
+• Casino/Gambling Werbung  
+• Krypto-Token Scams
+• Urgency/Pressure ("jetzt", "schnell", "limitiert")
+• Testimonials mit Geldbeträgen
+• Fake Erfolgsgeschichten
+
+NORMALE NACHRICHTEN (1-3):
+• Normale Unterhaltung
+• Fragen
+• Meinungsäußerungen ohne kommerzielle Absicht
+
+Antworte NUR mit einem JSON-Objekt:
+{
+  "spam_score": 1-10,
+  "reason": "Kurze Begründung auf Deutsch",
+  "confidence": 0-100,
+  "detected_patterns": ["Liste der erkannten Spam-Muster"]
+}"""
+
+        user_prompt = f"""Analysiere diese Telegram-Nachricht:
+
+Nachricht: "{message_text}"
+Von User: @{username}
+Chat-Kontext: {chat_context}
+
+Bewerte das Spam-Risiko."""
+
+        # OpenAI API Call
+        headers = {
+            "Authorization": f"Bearer {openai_api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": OPENAI_MODEL,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            "temperature": 0.1,
+            "max_tokens": 200
+        }
+        
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers=headers,
+                json=payload
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                ai_response = result["choices"][0]["message"]["content"].strip()
+                
+                try:
+                    # Parse AI response
+                    ai_data = json.loads(ai_response)
+                    
+                    return {
+                        "ai_score": int(ai_data.get("spam_score", 0)),
+                        "ai_reason": ai_data.get("reason", "AI-Analyse"),
+                        "confidence": int(ai_data.get("confidence", 50)),
+                        "detected_patterns": ai_data.get("detected_patterns", []),
+                        "raw_response": ai_response
+                    }
+                except json.JSONDecodeError:
+                    logger.error(f"❌ Invalid AI response: {ai_response}")
+                    return {"ai_score": 0, "ai_reason": "AI response parse error", "confidence": 0}
+            else:
+                logger.error(f"❌ OpenAI API error: {response.status_code}")
+                return {"ai_score": 0, "ai_reason": f"API error {response.status_code}", "confidence": 0}
+                
+    except Exception as e:
+        logger.error(f"❌ AI analysis error: {e}")
+        return {"ai_score": 0, "ai_reason": f"AI error: {str(e)}", "confidence": 0}
+
+def should_use_ai_analysis(message_text: str, has_links: bool, emoji_count: int, spam_words: List[str]) -> bool:
+    """Determine if message needs AI analysis (cost optimization)"""
+    # Use AI only for potentially suspicious messages
+    if len(spam_words) > 0:  # Contains spam keywords
+        return True
+    if has_links and emoji_count > 3:  # Links + emojis
+        return True
+    if "$" in message_text or "€" in message_text:  # Money symbols
+        return True
+    if len(message_text.split()) > 50:  # Long messages
+        return True
+    if "promo" in message_text.lower() or "code" in message_text.lower():
+        return True
+    
+    return False
+
+def has_money_symbols(text: str) -> bool:
+    """Check if text contains money-related symbols"""
+    if not text:
+        return False
+    money_symbols = ['$', '€', '£', '¥', '₿', '💰', '💵', '💴', '💶', '💷']
+    return any(symbol in text for symbol in money_symbols)
 
 # CAPTCHA & USER VERIFICATION FUNCTIONS
 async def is_user_verified(user_id: int, chat_id: int) -> bool:
@@ -273,6 +406,8 @@ def reset_daily_fallback():
         fallback_stats["messages_today"] = 0
         fallback_stats["captcha_solved_today"] = 0
         fallback_stats["captcha_failed_today"] = 0
+        fallback_stats["ai_detections_today"] = 0
+        fallback_stats["rule_detections_today"] = 0
         fallback_stats["last_reset"] = today
 
 async def get_today_stats():
@@ -285,6 +420,13 @@ async def get_today_stats():
             messages_today = await mongodb.messages.count_documents({"timestamp": {"$gte": today}})
             captcha_solved = await mongodb.verified_users.count_documents({"verification_time": {"$gte": today}})
             
+            # AI vs Rule-based detections
+            ai_detections = await mongodb.spam_reports.count_documents({
+                "timestamp": {"$gte": today}, 
+                "detection_method": "ai"
+            })
+            rule_detections = spam_today - ai_detections
+            
             spam_rate = round((spam_today / max(messages_today, 1)) * 100, 1) if messages_today > 0 else 0
             
             return {
@@ -292,6 +434,8 @@ async def get_today_stats():
                 "messages_total": messages_today,
                 "captcha_solved": captcha_solved,
                 "captcha_failed": 0,  # Schwer aus DB zu berechnen
+                "ai_detections": ai_detections,
+                "rule_detections": rule_detections,
                 "spam_rate": spam_rate,
                 "source": "MongoDB"
             }
@@ -307,6 +451,8 @@ async def get_today_stats():
         "messages_total": fallback_stats["messages_today"],
         "captcha_solved": fallback_stats["captcha_solved_today"],
         "captcha_failed": fallback_stats["captcha_failed_today"],
+        "ai_detections": fallback_stats["ai_detections_today"],
+        "rule_detections": fallback_stats["rule_detections_today"],
         "spam_rate": spam_rate,
         "source": "Live-Memory"
     }
@@ -382,12 +528,17 @@ async def handle_stats_command(chat_id: int, user_id: int, command: str):
             stats = await get_today_stats()
             
             db_status = "✅ MongoDB" if stats["source"] == "MongoDB" else "🔧 Live-Memory"
+            ai_status = "🤖 Aktiv" if AI_ENABLED else "❌ Deaktiviert"
             
-            message = f"""📊 **SPAM STATISTIKEN (Heute)**
+            message = f"""📊 **AI-SPAM STATISTIKEN (Heute)**
 ━━━━━━━━━━━━━━━━━━━━
 🚫 Spam blockiert: **{stats['spam_blocked']}**
 📈 Spam-Rate: **{stats['spam_rate']}%**
 💬 Nachrichten gesamt: **{stats['messages_total']}**
+
+🤖 **AI vs REGEL-SYSTEM**
+🧠 AI-Erkennungen: **{stats.get('ai_detections', 0)}**
+📋 Regel-Erkennungen: **{stats.get('rule_detections', 0)}**
 
 🔒 **CAPTCHA STATISTIKEN**
 ✅ Erfolgreich verifiziert: **{stats['captcha_solved']}**
@@ -395,29 +546,35 @@ async def handle_stats_command(chat_id: int, user_id: int, command: str):
 
 ✅ **Bot läuft perfekt!**
 💾 Datenbank: {db_status}
-🛡️ CAPTCHA-Schutz: Aktiv
-📹 **NEU:** Videos ohne Text = Spam"""
+🤖 AI-System: {ai_status}
+🛡️ CAPTCHA-Schutz: Aktiv"""
             
             await send_telegram_message(chat_id, message)
         
         elif command == "/help":
             db_status = "✅ MongoDB" if mongodb_available else "🔧 Live"
-            help_message = f"""🤖 **SPAM-BOT BEFEHLE**
+            ai_status = "🤖 Aktiv" if AI_ENABLED else "❌ Aus"
+            help_message = f"""🤖 **AI-SPAM-BOT BEFEHLE**
 ━━━━━━━━━━━━━━━━━━━━
-📊 `/stats` - Statistiken mit CAPTCHA
+📊 `/stats` - AI + Regel Statistiken
 ❓ `/help` - Diese Hilfe
 
 👤 **Admin:** ✅ (User ID: {user_id})
 
-🛡️ **Schutz-Features:**
-• Spam-Erkennung (38 Keywords)
-• CAPTCHA für neue User
-• Verdächtige Link-Erkennung
-• Emoji-Spam Filter
+🛡️ **PREMIUM SCHUTZ-FEATURES:**
+• **🧠 AI-Spam Erkennung (OpenAI GPT-4o)**
+• **📊 Intelligent Scoring (1-10 Scale)**
+• **🎯 Context-Aware Analysis**
+• **💰 Financial Scam Detection**
+• **🔗 Suspicious URL Analysis**
 • **📹 Videos ohne Text blockieren**
 • **🖼️ Bilder ohne Beschreibung blockieren**
+• **🔒 CAPTCHA für neue User**
+• **📈 60+ Spam Keywords**
 
-💾 Datenbank: {db_status}"""
+💾 Datenbank: {db_status}
+🤖 AI-System: {ai_status}
+💡 Model: {OPENAI_MODEL}"""
             await send_telegram_message(chat_id, help_message)
     
     except Exception as e:
@@ -431,7 +588,7 @@ async def startup_db_client():
         
         # Start Telegram polling
         asyncio.create_task(polling_loop())
-        logger.info("🚀 Bot started with robust MongoDB handling!")
+        logger.info("🚀 AI-Bot started with robust MongoDB handling!")
         
     except Exception as e:
         logger.error(f"Startup error: {e}")
@@ -439,12 +596,14 @@ async def startup_db_client():
 @app.get("/")
 async def root():
     return {
-        "message": "🤖 @manuschatbot läuft PERFEKT mit CAPTCHA!",
-        "version": "4.0.0",
+        "message": "🤖 AI-Powered @manuschatbot läuft PERFEKT!",
+        "version": "5.0.0",
         "admin_user": "539342443",
         "status": "healthy",
         "mongodb_available": mongodb_available,
-        "features": ["Spam Detection", "CAPTCHA System", "Admin Commands"]
+        "ai_enabled": AI_ENABLED,
+        "ai_model": OPENAI_MODEL,
+        "features": ["AI Spam Detection", "CAPTCHA System", "Media Protection", "Financial Scam Detection"]
     }
 
 @app.get("/api/health")
@@ -455,7 +614,10 @@ async def health_check():
         "admin_user": "539342443",
         "telegram_bot": "@manuschatbot",
         "mongodb_available": mongodb_available,
+        "ai_enabled": AI_ENABLED,
+        "ai_model": OPENAI_MODEL,
         "captcha_enabled": True,
+        "enhanced_scam_protection": True,
         "stats": stats,
         "timestamp": datetime.utcnow()
     }
@@ -551,40 +713,85 @@ async def process_message(message_data: Dict[str, Any]):
                 logger.info(f"🔒 CAPTCHA sent to new user: @{username} (ID: {user_id})")
                 return
         
-        # User is verified - normal spam detection
+        # User is verified - HYBRID AI + RULE-BASED spam detection
         if message_text:
+            # Get basic analysis first
             spam_words = contains_spam_keywords(message_text)
             has_suspicious = has_suspicious_links(message_text)
             emoji_count = count_emojis(message_text)
+            has_money_symbols_detected = has_money_symbols(message_text)
+            words_total = word_count(message_text)
+            has_url_links = has_links(message_text)
             
             is_spam = False
             reason = ""
+            detection_method = "rule"
+            ai_analysis = None
             
+            # RULE-BASED DETECTION (Fast check first)
             if has_suspicious:
                 is_spam = True
                 reason = "Verdächtige URL erkannt"
             elif len(spam_words) >= 3:
                 is_spam = True
                 reason = f"Spam Keywords: {', '.join(spam_words[:3])}"
-            elif emoji_count > 10 and has_links(message_text):
+            elif has_money_symbols_detected and has_url_links and emoji_count > 5:
                 is_spam = True
-                reason = f"Zu viele Emojis ({emoji_count}) mit Links"
+                reason = "Geld-Symbole + Links + Emojis (klassischer Scam)"
             
+            # AI ANALYSIS (For uncertain cases)
+            if not is_spam and should_use_ai_analysis(message_text, has_url_links, emoji_count, spam_words):
+                logger.info(f"🤖 AI analysis for suspicious message from @{username}")
+                ai_analysis = await analyze_message_with_ai(message_text, username, "German Telegram group")
+                
+                if ai_analysis and ai_analysis.get("ai_score", 0) >= AI_SPAM_THRESHOLD:
+                    is_spam = True
+                    reason = f"AI-Erkennung (Score: {ai_analysis.get('ai_score')}/10) - {ai_analysis.get('ai_reason', 'AI-Analyse')}"
+                    detection_method = "ai"
+                    
+                    # Track AI detection
+                    reset_daily_fallback()
+                    fallback_stats["ai_detections_today"] += 1
+                    
+                    logger.warning(f"🤖 AI SPAM: @{username} - Score: {ai_analysis.get('ai_score')}/10")
+            elif is_spam:
+                # Track rule-based detection
+                reset_daily_fallback()
+                fallback_stats["rule_detections_today"] += 1
+                
             if is_spam:
                 fallback_stats["spam_blocked_today"] += 1
-                logger.warning(f"🚫 SPAM: @{username} - {reason}")
+                logger.warning(f"🚫 SPAM ({detection_method.upper()}): @{username} - {reason}")
                 await handle_spam(chat_id, message_id, user_id, username, reason)
                 
-                # Log spam to DB (if available)
-                await log_to_db("spam_reports", {
+                # Enhanced logging with AI data
+                spam_log = {
                     "id": str(uuid.uuid4()),
                     "message_id": message_id,
                     "chat_id": chat_id,
                     "user_id": user_id,
                     "username": username,
                     "reason": reason,
+                    "detection_method": detection_method,
+                    "message_preview": message_text[:200],
+                    "emoji_count": emoji_count,
+                    "spam_keywords": spam_words,
+                    "has_money_symbols": has_money_symbols_detected,
+                    "has_links": has_url_links,
                     "timestamp": datetime.utcnow()
-                })
+                }
+                
+                # Add AI analysis data if available
+                if ai_analysis:
+                    spam_log.update({
+                        "ai_score": ai_analysis.get("ai_score", 0),
+                        "ai_confidence": ai_analysis.get("confidence", 0),
+                        "ai_patterns": ai_analysis.get("detected_patterns", []),
+                        "ai_reason": ai_analysis.get("ai_reason", "")
+                    })
+                
+                await log_to_db("spam_reports", spam_log)
+                return
         
         # Check for MEDIA SPAM (Videos/Images without text)
         has_video = bool(message_data.get('video') or message_data.get('video_note'))
@@ -606,6 +813,7 @@ async def process_message(message_data: Dict[str, Any]):
             reason = f"{media_type} ohne Text/Beschreibung"
             
             fallback_stats["spam_blocked_today"] += 1
+            fallback_stats["rule_detections_today"] += 1
             logger.warning(f"🚫 MEDIA SPAM: @{username} - {reason}")
             await handle_spam(chat_id, message_id, user_id, username, reason)
             
@@ -617,6 +825,7 @@ async def process_message(message_data: Dict[str, Any]):
                 "user_id": user_id,
                 "username": username,
                 "reason": reason,
+                "detection_method": "rule",
                 "media_type": media_type,
                 "timestamp": datetime.utcnow()
             })
