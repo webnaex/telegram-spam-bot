@@ -1,5 +1,6 @@
 # Railway Telegram Anti-Spam Bot mit AI-POWERED Detection
-# Version 5.0 - AI + CAPTCHA + Enhanced Protection + Channel Fix
+# Version 5.1 - AI + CAPTCHA + Enhanced Protection + Channel Message Detection
+# FIX: Erkennt jetzt Kanal-Nachrichten in verknüpften Diskussionsgruppen (sender_chat)
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -50,7 +51,7 @@ fallback_stats = {
     "last_reset": datetime.utcnow().date()
 }
 
-# ENHANCED SPAM DETECTION CONFIGURATION
+# SPAM DETECTION CONFIGURATION
 SPAM_KEYWORDS = [
     'pump', 'pumpfun', 'airdrop', 'claim', 'bonus', 'solana', 'usdt', 'sol',
     'prove', 'tokens', 'allocated', 'eligible', 'wallets', 'distributed',
@@ -574,9 +575,7 @@ async def handle_stats_command(chat_id: int, user_id: int, command: str):
 
 💾 Datenbank: {db_status}
 🤖 AI-System: {ai_status}
-💡 Model: {OPENAI_MODEL}
-
-⚠️ **NUR für Telegram-Gruppen!**"""
+💡 Model: {OPENAI_MODEL}"""
             await send_telegram_message(chat_id, help_message)
     
     except Exception as e:
@@ -590,7 +589,7 @@ async def startup_db_client():
         
         # Start Telegram polling
         asyncio.create_task(polling_loop())
-        logger.info("🚀 AI-Bot started with robust MongoDB handling!")
+        logger.info("🚀 Bot started with robust MongoDB handling!")
         
     except Exception as e:
         logger.error(f"Startup error: {e}")
@@ -598,15 +597,12 @@ async def startup_db_client():
 @app.get("/")
 async def root():
     return {
-        "message": "🤖 AI-Powered @manuschatbot läuft PERFEKT!",
-        "version": "5.0.0",
+        "message": "🤖 @manuschatbot läuft PERFEKT mit CAPTCHA!",
+        "version": "5.1.0",
         "admin_user": "539342443",
         "status": "healthy",
         "mongodb_available": mongodb_available,
-        "ai_enabled": AI_ENABLED,
-        "ai_model": OPENAI_MODEL,
-        "channel_safe": True,
-        "features": ["AI Spam Detection", "CAPTCHA System", "Media Protection", "Financial Scam Detection", "Channel-Safe Operation"]
+        "features": ["Spam Detection", "CAPTCHA System", "Admin Commands", "Channel Message Detection"]
     }
 
 @app.get("/api/health")
@@ -617,11 +613,7 @@ async def health_check():
         "admin_user": "539342443",
         "telegram_bot": "@manuschatbot",
         "mongodb_available": mongodb_available,
-        "ai_enabled": AI_ENABLED,
-        "ai_model": OPENAI_MODEL,
         "captcha_enabled": True,
-        "enhanced_scam_protection": True,
-        "channel_safe": True,
         "stats": stats,
         "timestamp": datetime.utcnow()
     }
@@ -665,18 +657,49 @@ async def process_message(message_data: Dict[str, Any]):
         message_text = message_data.get('text') or message_data.get('caption', '')
         message_id = message_data['message_id']
         
-        # Check if this is a channel (not group) - Skip processing
+        # CRITICAL: Check if message is from a CHANNEL (sender_chat field)
+        # When a channel posts to a linked discussion group, it has 'sender_chat'
+        sender_chat = message_data.get('sender_chat')
+        if sender_chat:
+            sender_chat_type = sender_chat.get('type', '')
+            sender_chat_title = sender_chat.get('title', 'Unknown')
+            sender_chat_id = sender_chat.get('id', 0)
+            logger.warning(f"📢 KANAL-NACHRICHT ERKANNT: Von '{sender_chat_title}' (Type: {sender_chat_type}, ID: {sender_chat_id}) - WIRD ÜBERSPRUNGEN!")
+            return
+        
+        # MULTIPLE CHANNEL CHECKS - Skip processing for channels
         chat_type = message_data['chat'].get('type', 'private')
-        if chat_type == 'channel':
-            logger.warning(f"⚠️ Bot running in channel {chat_id} - Skipping processing to avoid interference")
+        chat_title = message_data['chat'].get('title', 'Unknown')
+        
+        # Skip ALL channel types
+        if chat_type in ['channel', 'supergroup_channel']:
+            logger.warning(f"⚠️ CHANNEL DETECTED: {chat_type} ({chat_title}) - SKIPPING ALL PROCESSING")
+            return
+            
+        # Skip if chat_id is negative and looks like channel (channels usually have very negative IDs)
+        if chat_id < -1000000000000:  # Channel ID pattern
+            logger.warning(f"⚠️ CHANNEL ID PATTERN DETECTED: {chat_id} - SKIPPING PROCESSING")
+            return
+            
+        # Skip if admin user (YOU) - Never process admin messages
+        if is_admin_user(user_id):
+            logger.info(f"✅ Admin user @{username} - SKIPPING ALL PROCESSING")
+            return
+        
+        # Additional safety: Skip if from user has no username and looks like channel
+        if not username and message_data['chat'].get('type') != 'private':
+            logger.warning(f"⚠️ SUSPICIOUS CHAT TYPE: {chat_type} - SKIPPING")
             return
         
         if message_data['from'].get('is_bot'):
             return
         
-        # Skip admin user from CAPTCHA
-        if is_admin_user(user_id):
+        # Only process GROUPS and SUPERGROUPS
+        if chat_type not in ['group', 'supergroup']:
+            logger.warning(f"⚠️ NOT A GROUP: {chat_type} - SKIPPING")
             return
+        
+        logger.info(f"✅ Processing GROUP message: {chat_type} from @{username}")
         
         # Count message (fallback)
         reset_daily_fallback()
@@ -823,7 +846,6 @@ async def process_message(message_data: Dict[str, Any]):
             reason = f"{media_type} ohne Text/Beschreibung"
             
             fallback_stats["spam_blocked_today"] += 1
-            fallback_stats["rule_detections_today"] += 1
             logger.warning(f"🚫 MEDIA SPAM: @{username} - {reason}")
             await handle_spam(chat_id, message_id, user_id, username, reason)
             
@@ -835,7 +857,6 @@ async def process_message(message_data: Dict[str, Any]):
                 "user_id": user_id,
                 "username": username,
                 "reason": reason,
-                "detection_method": "rule",
                 "media_type": media_type,
                 "timestamp": datetime.utcnow()
             })
