@@ -1,5 +1,5 @@
 """
-Zentrale Konfiguration für den Telegram Anti-Spam Bot
+Zentrale Konfiguration für den Telegram Anti-Spam Boot
 """
 import os
 from typing import List
