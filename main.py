@@ -1,5 +1,5 @@
 # Railway Telegram Anti-Spam Bot mit AI-POWERED Detection
-# Version 5.2 - AI + CAPTCHA + Enhanced Protection + Channel Message Detection + Aggressive Scam Detection
+# Version 5.2.1 - AI + CAPTCHA + Enhanced Protection + Channel Message Detection + Aggressive Scam Detection
 # FIX: Erkennt jetzt Kanal-Nachrichten in verknüpften Diskussionsgruppen (sender_chat)
 # NEW: Verbesserte Promo-Code Erkennung, niedrigere Emoji-Schwelle, mehr Scam-Keywords
 
