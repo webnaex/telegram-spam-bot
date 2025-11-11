@@ -1,6 +1,7 @@
 # Railway Telegram Anti-Spam Bot mit AI-POWERED Detection
-# Version 5.2.1 - AI + CAPTCHA + Enhanced Protection + Channel Message Detection + Aggressive Scam Detection
+# Version 5.3 - AI + CAPTCHA + Enhanced Protection + Channel Message Detection + Aggressive Scam Detection
 # FIX: Erkennt jetzt Kanal-Nachrichten in verknüpften Diskussionsgruppen (sender_chat)
+# FIX: Admin kann jetzt /stats und /help Befehle nutzen (Commands vor Admin-Check)
 # NEW: Verbesserte Promo-Code Erkennung, niedrigere Emoji-Schwelle, mehr Scam-Keywords
 
 from fastapi import FastAPI, HTTPException
@@ -618,7 +619,7 @@ async def startup_db_client():
 async def root():
     return {
         "message": "🤖 @manuschatbot läuft PERFEKT mit CAPTCHA!",
-        "version": "5.2.0",
+        "version": "5.3.0",
         "admin_user": "539342443",
         "status": "healthy",
         "mongodb_available": mongodb_available,
@@ -700,11 +701,6 @@ async def process_message(message_data: Dict[str, Any]):
         if chat_id < -1000000000000:  # Channel ID pattern
             logger.warning(f"⚠️ CHANNEL ID PATTERN DETECTED: {chat_id} - SKIPPING PROCESSING")
             return
-            
-        # Skip if admin user (YOU) - Never process admin messages
-        if is_admin_user(user_id):
-            logger.info(f"✅ Admin user @{username} - SKIPPING ALL PROCESSING")
-            return
         
         # Additional safety: Skip if from user has no username and looks like channel
         if not username and message_data['chat'].get('type') != 'private':
@@ -725,13 +721,18 @@ async def process_message(message_data: Dict[str, Any]):
         reset_daily_fallback()
         fallback_stats["messages_today"] += 1
         
-        # Handle commands first
+        # Handle commands first (BEFORE admin check, so admin can use commands!)
         if message_text and message_text.startswith('/'):
             command = message_text.split()[0].lower()
             if command in ['/stats', '/help']:
                 logger.info(f"📊 {command} from @{username} (ID: {user_id})")
                 await handle_stats_command(chat_id, user_id, command)
                 return
+        
+        # Skip if admin user (YOU) - Admin messages are NOT spam-checked, but commands work!
+        if is_admin_user(user_id):
+            logger.info(f"✅ Admin user @{username} - SKIPPING SPAM CHECK")
+            return
         
         # Check if user is verified
         is_verified = await is_user_verified(user_id, chat_id)
