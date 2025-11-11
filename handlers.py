@@ -175,12 +175,14 @@ async def whitelist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 **Commands:**
 `/whitelist list` - Alle Whitelist-User anzeigen
-`/whitelist add <user_id>` - User zur Whitelist hinzufügen
-`/whitelist remove <user_id>` - User von Whitelist entfernen
+`/whitelist add <user_id|@username>` - User zur Whitelist hinzufügen
+`/whitelist remove <user_id|@username>` - User von Whitelist entfernen
 
 **Beispiele:**
 `/whitelist add 123456789`
+`/whitelist add @max`
 `/whitelist remove 123456789`
+`/whitelist remove @anna`
 
 **Hinweis:** User auf der Whitelist werden nie als Spam markiert.
 """
