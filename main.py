@@ -1,5 +1,5 @@
 """
-Telegram Anti-Spam Bot
+Telegram Anti-Spam Bot v2
 Hauptdatei mit Bot-Logik und Message Handler
 """
 import logging
