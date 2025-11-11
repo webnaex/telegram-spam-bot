@@ -10,8 +10,16 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 # MongoDB Connection
 MONGODB_URL = os.getenv("MONGODB_URL", "")
 
-# Admin User ID
-ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "539342443"))
+# Admin User IDs (komma-separiert in Railway Variable)
+# Beispiel in Railway: ADMIN_USER_IDS=539342443,123456789,987654321
+admin_ids_str = os.getenv("ADMIN_USER_IDS", os.getenv("ADMIN_USER_ID", "539342443"))
+if ',' in admin_ids_str:
+    ADMIN_USER_IDS = [int(uid.strip()) for uid in admin_ids_str.split(',') if uid.strip()]
+else:
+    ADMIN_USER_IDS = [int(admin_ids_str)]
+
+# Backwards compatibility: ADMIN_USER_ID ist der erste Admin
+ADMIN_USER_ID = ADMIN_USER_IDS[0]
 
 # Server Port
 PORT = int(os.getenv("PORT", "8000"))
