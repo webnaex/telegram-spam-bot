@@ -1,973 +1,712 @@
-# Railway Telegram Anti-Spam Bot mit AI-POWERED Detection
-# Version 5.4 - STATS FIX + AI + CAPTCHA + Enhanced Protection
-# ✅ CRITICAL FIX: /stats funktioniert wieder! Commands werden jetzt VOR allen Checks behandelt
-# FIX: MongoDB Client wird korrekt global gespeichert
-# FIX: Error Handling mit User-Feedback
-# FIX: Erkennt jetzt Kanal-Nachrichten in verknüpften Diskussionsgruppen (sender_chat)
-# FIX: Admin kann jetzt /stats und /help Befehle nutzen (Commands GANZ am Anfang!)
-# NEW: Verbesserte Promo-Code Erkennung, niedrigere Emoji-Schwelle, mehr Scam-Keywords
+# TELEGRAM ANTI-SPAM BOT - COMPLETE CODE
+# Version 2.0 - Überarbeitete und optimierte Version
+# Funktioniert mit FastAPI + MongoDB + Telegram Bot API
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 import os
 import uuid
-import logging
-import asyncio
-import httpx
-import re
-import random
-import json
 from datetime import datetime, timedelta
+import re
+import logging
+from dotenv import load_dotenv
+import httpx
+import emoji
+from langdetect import detect
+from langdetect.lang_detect_exception import LangDetectException
+from motor.motor_asyncio import AsyncIOMotorClient
+
+# Load environment variables
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="AI-Powered Telegram Anti-Spam Bot", version="5.4.0")
+app = FastAPI(title="Telegram Anti-Spam Bot", version="2.0.0")
+
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Global variables
-mongodb_client = None  # FIX: Client muss global gespeichert werden!
+bot = None
 mongodb = None
-mongodb_available = False
 
-# AI Configuration
-AI_ENABLED = True
-OPENAI_MODEL = "gpt-4o-mini"  # Cost-effective model
-AI_SPAM_THRESHOLD = 5  # Score 5+ = Spam (gesenkt für bessere Erkennung)
-
-# CAPTCHA & User Verification System
-user_verification = {}  # In-memory storage für user verification status
-captcha_questions = [
-    {"question": "Schreiben Sie das Wort 'verifiziert' um zu bestätigen, dass Sie ein echter Mensch sind:", "answer": "verifiziert"},
-    {"question": "Anti-Spam Verifikation: Schreiben Sie 'mensch' als Antwort:", "answer": "mensch"},
-    {"question": "Bestätigen Sie, dass Sie kein Bot sind. Schreiben Sie 'echt':", "answer": "echt"},
-    {"question": "Verifikation erforderlich: Tippen Sie 'bestätigt':", "answer": "bestätigt"},
-    {"question": "Spam-Schutz aktiv: Schreiben Sie 'freischalten':", "answer": "freischalten"}
-]
-
-# Fallback Stats (wenn MongoDB nicht verfügbar)
-fallback_stats = {
-    "spam_blocked_today": 0,
-    "messages_today": 0,
-    "captcha_solved_today": 0,
-    "captcha_failed_today": 0,
-    "ai_detections_today": 0,
-    "rule_detections_today": 0,
-    "last_reset": datetime.utcnow().date()
-}
-
-# SPAM DETECTION CONFIGURATION
+# ENHANCED SPAM DETECTION CONFIGURATION
 SPAM_KEYWORDS = [
+    # Crypto/Token scams
     'pump', 'pumpfun', 'airdrop', 'claim', 'bonus', 'solana', 'usdt', 'sol',
     'prove', 'tokens', 'allocated', 'eligible', 'wallets', 'distributed',
     'listings', 'upbit', 'bithumb', 'binance', 'tge', 'axiom',
+    
+    # Casino/Gambling
     'casino', 'bet', 'jackpot', 'slot', 'poker', 'gambling', 'jetluxe', 'vexway',
-    'payout', 'withdraw', 'deposit', 'play now', 'player', 'promo code',
+    'payout', 'withdraw', 'deposit', 'play now', 'player', 'bonus', 'promo code',
+    
+    # Money/Financial scams
     'gift', 'free', 'money', 'cash', 'earn', 'income', 'profit', '$600', '$800',
     'investment', 'trading', 'forex', 'crypto', 'bitcoin',
+    
+    # Urgency tactics
     'limited', 'expire', 'urgent', 'immediate', 'instant', 'quick', 'fast', 'now',
-    'hurry', 'act now', 'register', 'sign up', 'join', 'activate', 'redeem',
-    'visit', 'website', 'click here', 'official', 'welcome', 'honor', 'launch',
-    'telegram bot', 'trading bot', 'bot for trading', 'get from', 'can get',
-    # FINANCIAL SCAM KEYWORDS - NEU!
-    'scam', 'legit', 'proof', 'promo', 'code', 'cashout', 'cash out', 'e-wallet',
-    'literally', 'shaking', 'tried it', 'signed up', 'send me', 'sent me',
-    'get this', 'managed to', 'right after', 'just', 'minutes', 'friends thought',
-    'saw the proof', 'get it while', 'while it', 'hot', 'everyone',
-    # NEUE SCAM KEYWORDS V5.2
-    'registration bonus', 'skeptical', 'mindblown', 'drake', 'drakist', 
-    'didn\'t believe', 'managed to withdraw', 'arrived in', 'recommending',
-    'promotion is still active', 'gave me', 'the best part', 'try it', 'thank you so much'
+    'hurry', 'act now', 'don\\'t miss', 'last chance', 'today only',
+    
+    # Promotional terms
+    'register', 'sign up', 'join', 'activate', 'redeem', 'visit', 'website',
+    'click here', 'official', 'welcome', 'honor', 'launch', 'special',
+    
+    # Trading bot patterns
+    'telegram bot', 'trading bot', 'bot for trading', 'get from', 'can get'
 ]
 
 SUSPICIOUS_DOMAINS = [
     'clck.ru', 'bit.ly', 'tinyurl.com', 'short.link', 'cutt.ly', 'clk.li',
     't.co', '0.ma', '1.gs', '2.gp', '3.ly', '4.gp', '5.gp', 'is.gd',
-    'ow.ly', 'buff.ly', 'su.pr', 'tiny.cc', 'tinyurl.co', 'shorturl.at'
+    'ow.ly', 'buff.ly', 'su.pr', 'tiny.cc', 'tinyurl.co', 'shorturl.at',
+    'rb.gy', 'v.gd', 'short.gy', 'tiny.one', 'link.ly', 'go.link', 'u.to'
 ]
 
+# Pydantic models
 class TestSpamRequest(BaseModel):
     message: str
     has_media: bool = False
 
-def is_admin_user(user_id: int) -> bool:
-    admin_id = os.getenv("ADMIN_USER_ID", "539342443")
-    return str(user_id) == str(admin_id)
+class SpamReport(BaseModel):
+    message_id: int
+    chat_id: int
+    user_id: int
+    username: str
+    message: str
+    reason: str
+    timestamp: datetime
+    action_taken: str
+
+# Utility functions
+def detect_language(text: str) -> str:
+    """Detect language of text with error handling"""
+    if not text or len(text.strip()) < 3:
+        return "unknown"
+    try:
+        return detect(text)
+    except LangDetectException:
+        return "unknown"
+    except Exception as e:
+        logger.error(f"Language detection error: {e}")
+        return "unknown"
 
 def has_links(text: str) -> bool:
+    """Check if text contains URLs"""
     if not text:
         return False
-    url_pattern = re.compile(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+])+|(?:www\.)?[a-zA-Z0-9-]+\.[a-zA-Z]{2,}')
+    url_pattern = re.compile(
+        r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\\\(\\\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
+        r'|(?:www\\.)?[a-zA-Z0-9-]+\\.[a-zA-Z]{2,}'
+        r'|[a-zA-Z0-9-]+\\.(com|org|net|edu|gov|mil|biz|info|mobi|name|aero|jobs|museum)'
+    )
     return bool(url_pattern.search(text))
 
 def has_suspicious_links(text: str) -> bool:
+    """Check if text contains suspicious URL domains"""
     if not text:
         return False
-    return any(domain in text.lower() for domain in SUSPICIOUS_DOMAINS)
+    text_lower = text.lower()
+    return any(domain in text_lower for domain in SUSPICIOUS_DOMAINS)
 
 def count_emojis(text: str) -> int:
+    """Count emoji characters in text"""
     if not text:
         return 0
     try:
-        import emoji
         return len([c for c in text if c in emoji.EMOJI_DATA])
-    except:
-        # Fallback emoji counting
-        emoji_chars = ['😀', '😁', '😂', '🤣', '😃', '😄', '😅', '😆', '😉', '😊', '🔥', '💎', '🚀', '💰', '🎉', '❤️', '👍', '👎', '🙏', '💪']
-        return sum(1 for char in text if char in emoji_chars)
+    except Exception as e:
+        logger.error(f"Emoji counting error: {e}")
+        return 0
+
+def has_mentions(text: str) -> List[str]:
+    """Extract @mentions from text"""
+    if not text:
+        return []
+    mention_pattern = re.compile(r'@\\w+')
+    return mention_pattern.findall(text)
+
+def has_money_symbols(text: str) -> bool:
+    """Check if text contains money symbols or amounts"""
+    if not text:
+        return False
+    money_pattern = re.compile(
+        r'[\\$€£¥₹₽¢₩₪₦₨₱₡₫₴₵₸₲₺]|\\b\\d+\\s*(dollar|euro|pound|usd|eur|gbp|sol|solana)\\b', 
+        re.IGNORECASE
+    )
+    return bool(money_pattern.search(text))
 
 def contains_spam_keywords(text: str) -> List[str]:
+    """Check if text contains spam keywords"""
     if not text:
         return []
     text_lower = text.lower()
     return [keyword for keyword in SPAM_KEYWORDS if keyword in text_lower]
 
 def word_count(text: str) -> int:
-    return len(text.split()) if text else 0
-
-# AI-POWERED SPAM DETECTION FUNCTIONS
-async def analyze_message_with_ai(message_text: str, username: str, chat_context: str = "") -> Dict[str, Any]:
-    """Analyze message using OpenAI for intelligent spam detection"""
-    try:
-        if not AI_ENABLED or not message_text:
-            return {"ai_score": 0, "ai_reason": "AI disabled or no text", "confidence": 0}
-        
-        openai_api_key = os.getenv("OPENAI_API_KEY")
-        if not openai_api_key:
-            logger.error("❌ OpenAI API Key not found!")
-            return {"ai_score": 0, "ai_reason": "No API key", "confidence": 0}
-        
-        # AI Prompt for spam detection
-        system_prompt = """Du bist ein Experte für Spam-Erkennung in deutschen Telegram-Gruppen. 
-        
-BEWERTE jede Nachricht auf einer Skala von 1-10 (10 = definitiv Spam).
-
-SPAM-INDIKATOREN:
-• Finanzielle Scams (Geld, Gewinne, "free money", Promo-Codes)
-• Verdächtige Links oder URLs
-• Übermäßige Emojis mit kommerziellen Inhalten
-• Casino/Gambling Werbung  
-• Krypto-Token Scams
-• Urgency/Pressure ("jetzt", "schnell", "limitiert")
-• Testimonials mit Geldbeträgen
-• Fake Erfolgsgeschichten
-
-NORMALE NACHRICHTEN (1-3):
-• Normale Unterhaltung
-• Fragen
-• Meinungsäußerungen ohne kommerzielle Absicht
-
-Antworte NUR mit einem JSON-Objekt:
-{
-  "spam_score": 1-10,
-  "reason": "Kurze Begründung auf Deutsch",
-  "confidence": 0-100,
-  "detected_patterns": ["Liste der erkannten Spam-Muster"]
-}"""
-
-        user_prompt = f"""Analysiere diese Telegram-Nachricht:
-
-Nachricht: "{message_text}"
-Von User: @{username}
-Chat-Kontext: {chat_context}
-
-Bewerte das Spam-Risiko."""
-
-        # OpenAI API Call
-        headers = {
-            "Authorization": f"Bearer {openai_api_key}",
-            "Content-Type": "application/json"
-        }
-        
-        payload = {
-            "model": OPENAI_MODEL,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            "temperature": 0.1,
-            "max_tokens": 200
-        }
-        
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers=headers,
-                json=payload
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                ai_response = result["choices"][0]["message"]["content"].strip()
-                
-                try:
-                    # Parse AI response
-                    ai_data = json.loads(ai_response)
-                    
-                    return {
-                        "ai_score": int(ai_data.get("spam_score", 0)),
-                        "ai_reason": ai_data.get("reason", "AI-Analyse"),
-                        "confidence": int(ai_data.get("confidence", 50)),
-                        "detected_patterns": ai_data.get("detected_patterns", []),
-                        "raw_response": ai_response
-                    }
-                except json.JSONDecodeError:
-                    logger.error(f"❌ Invalid AI response: {ai_response}")
-                    return {"ai_score": 0, "ai_reason": "AI response parse error", "confidence": 0}
-            else:
-                logger.error(f"❌ OpenAI API error: {response.status_code}")
-                return {"ai_score": 0, "ai_reason": f"API error {response.status_code}", "confidence": 0}
-                
-    except Exception as e:
-        logger.error(f"❌ AI analysis error: {e}")
-        return {"ai_score": 0, "ai_reason": f"AI error: {str(e)}", "confidence": 0}
-
-def should_use_ai_analysis(message_text: str, has_links: bool, emoji_count: int, spam_words: List[str]) -> bool:
-    """Determine if message needs AI analysis (cost optimization)"""
-    # Use AI only for potentially suspicious messages
-    if len(spam_words) > 0:  # Contains spam keywords
-        return True
-    if has_links and emoji_count > 3:  # Links + emojis
-        return True
-    if "$" in message_text or "€" in message_text:  # Money symbols
-        return True
-    if len(message_text.split()) > 50:  # Long messages
-        return True
-    if "promo" in message_text.lower() or "code" in message_text.lower():
-        return True
-    
-    return False
-
-def has_money_symbols(text: str) -> bool:
-    """Check if text contains money-related symbols"""
+    """Count words in text"""
     if not text:
-        return False
-    money_symbols = ['$', '€', '£', '¥', '₿', '💰', '💵', '💴', '💶', '💷']
-    return any(symbol in text for symbol in money_symbols)
+        return 0
+    return len(text.split())
 
-def has_promo_code_pattern(text: str) -> bool:
-    """Check if text contains promo code patterns"""
-    if not text:
-        return False
-    text_lower = text.lower()
-    # Promo code indicators
-    promo_indicators = ['code:', 'promo:', 'promocode:', 'coupon:', 'referral:']
-    # Check for pattern like "Code: xyz" or "promo=xyz"
-    if any(indicator in text_lower for indicator in promo_indicators):
-        return True
-    # Check for "promo=" pattern in links
-    if 'promo=' in text_lower or '?code=' in text_lower or '?promo=' in text_lower:
-        return True
-    return False
-
-# CAPTCHA & USER VERIFICATION FUNCTIONS
-async def is_user_verified(user_id: int, chat_id: int) -> bool:
-    """Check if user is verified"""
-    user_key = f"{chat_id}_{user_id}"
-    
-    # Check memory first
-    if user_key in user_verification:
-        return user_verification[user_key].get("verified", False)
-    
-    # Check MongoDB if available
-    if mongodb_available and mongodb is not None:
-        try:
-            user_record = await mongodb.verified_users.find_one({
-                "user_id": user_id,
-                "chat_id": chat_id
-            })
-            if user_record:
-                # Cache in memory
-                user_verification[user_key] = {
-                    "verified": True,
-                    "verification_time": user_record.get("verification_time", datetime.utcnow())
-                }
-                return True
-        except Exception as e:
-            logger.error(f"Error checking verification: {e}")
-    
-    return False
-
-async def verify_user(user_id: int, chat_id: int, username: str):
-    """Mark user as verified"""
-    user_key = f"{chat_id}_{user_id}"
-    verification_time = datetime.utcnow()
-    
-    # Store in memory
-    user_verification[user_key] = {
-        "verified": True,
-        "verification_time": verification_time
-    }
-    
-    # Store in MongoDB if available
-    await log_to_db("verified_users", {
-        "user_id": user_id,
-        "chat_id": chat_id,
-        "username": username,
-        "verification_time": verification_time,
-        "id": str(uuid.uuid4())
-    })
-    
-    logger.info(f"✅ User verified: @{username} (ID: {user_id})")
-
-def get_random_captcha():
-    """Get random CAPTCHA question"""
-    return random.choice(captcha_questions)
-
-async def send_captcha(chat_id: int, user_id: int, username: str):
-    """Send CAPTCHA challenge to user"""
+async def user_days_since_join(user_id: int, chat_id: int) -> int:
+    """Get number of days since user joined"""
     try:
-        captcha = get_random_captcha()
+        if not mongodb:
+            return 0
+            
+        user_record = await mongodb.users.find_one({
+            "user_id": user_id,
+            "chat_id": chat_id
+        })
         
-        captcha_message = f"""🔒 **VERIFIKATION ERFORDERLICH**
-━━━━━━━━━━━━━━━━━━━━
-
-👋 Hallo @{username}!
-
-🛡️ Zum Schutz vor Spam müssen neue Mitglieder verifiziert werden.
-
-❓ **{captcha['question']}**
-
-⏰ Sie haben 5 Minuten Zeit.
-🚫 Andere Nachrichten werden bis zur Verifikation gelöscht."""
-
-        telegram_token = os.getenv("TELEGRAM_TOKEN")
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            await client.post(
-                f"https://api.telegram.org/bot{telegram_token}/sendMessage",
-                json={
-                    "chat_id": chat_id, 
-                    "text": captcha_message, 
-                    "parse_mode": "Markdown",
-                    "reply_to_message_id": None
-                }
-            )
-        
-        # Store expected answer in memory
-        user_key = f"{chat_id}_{user_id}"
-        user_verification[user_key] = {
-            "verified": False,
-            "expected_answer": captcha['answer'].lower(),
-            "captcha_sent_time": datetime.utcnow(),
-            "attempts": 0
-        }
-        
+        if not user_record:
+            return 0  # New user, 0 days
+            
+        join_time = user_record.get("join_time")
+        if join_time:
+            time_diff = datetime.utcnow() - join_time
+            return int(time_diff.total_seconds() / 86400)  # Convert to days
+            
+        return 0
     except Exception as e:
-        logger.error(f"Error sending CAPTCHA: {e}")
+        logger.error(f"Error calculating user days: {e}")
+        return 0
 
-async def check_captcha_answer(user_id: int, chat_id: int, username: str, message_text: str) -> bool:
-    """Check if CAPTCHA answer is correct"""
-    user_key = f"{chat_id}_{user_id}"
-    
-    if user_key not in user_verification:
-        return False
-    
-    user_data = user_verification[user_key]
-    expected_answer = user_data.get("expected_answer", "").lower()
-    user_answer = message_text.strip().lower()
-    
-    # Increment attempts
-    user_data["attempts"] = user_data.get("attempts", 0) + 1
-    
-    if user_answer == expected_answer:
-        # Correct answer!
-        await verify_user(user_id, chat_id, username)
-        reset_daily_fallback()
-        fallback_stats["captcha_solved_today"] += 1
-        
-        await send_telegram_message(chat_id, f"""✅ **VERIFIKATION ERFOLGREICH**
-
-🎉 Willkommen @{username}!
-
-Sie sind jetzt verifiziert und können normal chatten.
-🛡️ Unser Bot schützt diese Gruppe vor Spam.""")
-        
-        return True
-    else:
-        # Wrong answer
-        reset_daily_fallback()
-        fallback_stats["captcha_failed_today"] += 1
-        
-        if user_data["attempts"] >= 3:
-            # Too many attempts - kick user
-            await kick_user(chat_id, user_id, username, "Zu viele CAPTCHA-Fehlversuche")
-            del user_verification[user_key]
-        else:
-            # Send CAPTCHA again
-            await send_captcha(chat_id, user_id, username)
-        
-        return False
-
-async def kick_user(chat_id: int, user_id: int, username: str, reason: str):
-    """Kick user from chat"""
+async def is_user_new(user_id: int, chat_id: int) -> bool:
+    """Check if user joined recently (within 1 hour)"""
     try:
-        telegram_token = os.getenv("TELEGRAM_TOKEN")
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            # Ban user
-            await client.post(
-                f"https://api.telegram.org/bot{telegram_token}/banChatMember",
-                json={"chat_id": chat_id, "user_id": user_id}
-            )
-            # Unban to allow rejoining
-            await client.post(
-                f"https://api.telegram.org/bot{telegram_token}/unbanChatMember",
-                json={"chat_id": chat_id, "user_id": user_id}
-            )
-            # Send notification
-            await client.post(
-                f"https://api.telegram.org/bot{telegram_token}/sendMessage",
-                json={"chat_id": chat_id, "text": f"🚫 @{username} wurde entfernt.\n📋 Grund: {reason}"}
-            )
-        logger.info(f"👤 User kicked: @{username} - {reason}")
-    except Exception as e:
-        logger.error(f"Error kicking user: {e}")
-
-def reset_daily_fallback():
-    """Reset fallback stats if new day"""
-    global fallback_stats
-    today = datetime.utcnow().date()
-    if fallback_stats["last_reset"] != today:
-        fallback_stats["spam_blocked_today"] = 0
-        fallback_stats["messages_today"] = 0
-        fallback_stats["captcha_solved_today"] = 0
-        fallback_stats["captcha_failed_today"] = 0
-        fallback_stats["ai_detections_today"] = 0
-        fallback_stats["rule_detections_today"] = 0
-        fallback_stats["last_reset"] = today
-
-async def get_today_stats():
-    """Get today's statistics - MongoDB first, fallback second"""
-    try:
-        if mongodb_available and mongodb is not None:
-            # Try MongoDB first
-            today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-            spam_today = await mongodb.spam_reports.count_documents({"timestamp": {"$gte": today}})
-            messages_today = await mongodb.messages.count_documents({"timestamp": {"$gte": today}})
-            captcha_solved = await mongodb.verified_users.count_documents({"verification_time": {"$gte": today}})
-            
-            # AI vs Rule-based detections
-            ai_detections = await mongodb.spam_reports.count_documents({
-                "timestamp": {"$gte": today}, 
-                "detection_method": "ai"
-            })
-            rule_detections = spam_today - ai_detections
-            
-            spam_rate = round((spam_today / max(messages_today, 1)) * 100, 1) if messages_today > 0 else 0
-            
-            return {
-                "spam_blocked": spam_today,
-                "messages_total": messages_today,
-                "captcha_solved": captcha_solved,
-                "captcha_failed": 0,  # Schwer aus DB zu berechnen
-                "ai_detections": ai_detections,
-                "rule_detections": rule_detections,
-                "spam_rate": spam_rate,
-                "source": "MongoDB"
-            }
-    except Exception as e:
-        logger.error(f"MongoDB stats error: {e}")
-    
-    # Fallback to memory stats
-    reset_daily_fallback()
-    spam_rate = round((fallback_stats["spam_blocked_today"] / max(fallback_stats["messages_today"], 1)) * 100, 1)
-    
-    return {
-        "spam_blocked": fallback_stats["spam_blocked_today"],
-        "messages_total": fallback_stats["messages_today"],
-        "captcha_solved": fallback_stats["captcha_solved_today"],
-        "captcha_failed": fallback_stats["captcha_failed_today"],
-        "ai_detections": fallback_stats["ai_detections_today"],
-        "rule_detections": fallback_stats["rule_detections_today"],
-        "spam_rate": spam_rate,
-        "source": "Live-Memory"
-    }
-
-async def setup_mongodb():
-    """Robuste MongoDB Setup mit mehreren URLs"""
-    global mongodb, mongodb_available, mongodb_client
-    
-    # Alle möglichen MongoDB URLs probieren
-    possible_urls = [
-        os.getenv("MONGODB_URL"),
-        os.getenv("DATABASE_URL"), 
-        os.getenv("MONGO_URL"),
-        "mongodb://mongo:pjLGFTJxaIuKJfIRnNhQLaEGRAMGudJt@mongodb.railway.internal:27017",
-        "mongodb://mongo:pjLGFTJxaIuKJfIRnNhQLaEGRAMGudJt@mongodb.railway.internal:27017/telegram_spam_bot"
-    ]
-    
-    for url in possible_urls:
-        if not url:
-            continue
-        
-        try:
-            logger.info(f"🔄 Trying MongoDB: {url[:30]}...")
-            
-            from motor.motor_asyncio import AsyncIOMotorClient
-            client = AsyncIOMotorClient(url, serverSelectionTimeoutMS=5000)
-            
-            # Test connection BEFORE setting globals
-            await client.admin.command('ping')
-            
-            # Connection successful - NOW set globals
-            mongodb_client = client
-            mongodb = client.telegram_spam_bot
-            mongodb_available = True
-            
-            logger.info(f"✅ MongoDB connected successfully!")
-            logger.info(f"✅ Client: {mongodb_client is not None}, DB: {mongodb is not None}")
+        if not mongodb:
             return True
             
-        except Exception as e:
-            logger.warning(f"❌ MongoDB failed: {str(e)[:100]}")
-            continue
+        user_record = await mongodb.users.find_one({
+            "user_id": user_id,
+            "chat_id": chat_id
+        })
+        
+        if not user_record:
+            return True  # User not in database, consider as new
+            
+        join_time = user_record.get("join_time")
+        if join_time:
+            time_diff = datetime.utcnow() - join_time
+            return time_diff.total_seconds() < 3600  # 1 hour
+            
+        return True
+    except Exception as e:
+        logger.error(f"Error checking user status: {e}")
+        return True
+
+async def is_spam_message(message_text: str, user_id: int, chat_id: int, has_media: bool = False) -> tuple[bool, str]:
+    """
+    ENHANCED spam detection with comprehensive rules:
+    - Media restrictions for new users
+    - Emoji limits for new users
+    - Word count limits for new users
+    - Suspicious URLs (all users)
+    - Casino/Token scam patterns (all users)
+    - Multiple spam indicators
+    """
+    if not message_text and not has_media:
+        return False, ""
     
-    logger.warning("⚠️ MongoDB not available - using memory stats")
-    mongodb_available = False
-    return False
-
-async def log_to_db(collection: str, data: dict):
-    """Safely log to MongoDB with fallback"""
     try:
-        if mongodb_available and mongodb is not None:
-            await getattr(mongodb, collection).insert_one(data)
-            return True
+        # Check user status
+        days_since_join = await user_days_since_join(user_id, chat_id)
+        is_new_user = await is_user_new(user_id, chat_id)
+        
+        # Media check for new users
+        if has_media and days_since_join < 10:
+            return True, f"Medien-Beschränkung: Neue Benutzer können erst nach 10 Tagen Bilder senden (Mitglied seit {days_since_join} Tagen)"
+        
+        if not message_text:
+            return False, ""
+        
+        # Analyze message content
+        language = detect_language(message_text)
+        is_english = language == 'en'
+        is_german = language == 'de'
+        has_url = has_links(message_text)
+        has_suspicious_url = has_suspicious_links(message_text)
+        spam_words = contains_spam_keywords(message_text)
+        emoji_count = count_emojis(message_text)
+        has_money = has_money_symbols(message_text)
+        words = word_count(message_text)
+        mentions = has_mentions(message_text)
+        
+        # STRICT RULES FOR NEW USERS
+        if is_new_user:
+            if emoji_count > 3:
+                return True, f"Emoji-Limit: Neue Benutzer dürfen max. 3 Emojis verwenden ({emoji_count} erkannt)"
+            
+            if words > 20:
+                return True, f"Wort-Limit: Neue Benutzer dürfen max. 20 Wörter schreiben ({words} Wörter)"
+            
+            if is_english and mentions and not is_german:
+                return True, f"@Mention-Beschränkung: Keine @mentions in englischen Nachrichten für neue Benutzer: {', '.join(mentions)}"
+        
+        # PRIORITY RULES FOR ALL USERS
+        # 1. Suspicious URLs (highest priority)
+        if has_suspicious_url:
+            return True, "Verdächtige Short-URL erkannt - Sofortige Blockierung"
+        
+        # 2. Casino/Token scam patterns
+        casino_keywords = ['jetluxe', 'vexway', 'axiom', 'casino', 'bonus', '$600', '$800', 'promo code']
+        found_casino = [word for word in casino_keywords if word.lower() in message_text.lower()]
+        if found_casino and (has_money or emoji_count > 2):
+            return True, f"Casino-Scam erkannt: {', '.join(found_casino)}"
+        
+        # 3. Token/Crypto scam detection
+        crypto_keywords = ['axiom', 'airdrop', 'claim', 'tokens', 'sol', 'prove', 'distributed', 'eligible']
+        found_crypto = [word for word in crypto_keywords if word.lower() in message_text.lower()]
+        if len(found_crypto) >= 2 and (has_money or emoji_count > 1 or mentions):
+            return True, f"Token-Scam erkannt: {', '.join(found_crypto)}"
+        
+        # 4. Excessive emojis with links
+        if emoji_count > 8 and has_url:
+            return True, f"Spam-Pattern: Zu viele Emojis ({emoji_count}) mit Links"
+        
+        # 5. English spam with links and keywords
+        if is_english and has_url and len(spam_words) >= 2:
+            return True, f"Englischer Spam: Links + Keywords: {', '.join(spam_words[:5])}"
+        
+        # 6. Money symbols with links and spam words
+        if has_money and has_url and len(spam_words) >= 2:
+            return True, f"Finanz-Scam: Geld-Symbole + Links + Keywords: {', '.join(spam_words[:3])}"
+        
+        # 7. Multiple spam indicators
+        spam_score = 0
+        indicators = []
+        
+        if emoji_count > 5:
+            spam_score += 1
+            indicators.append(f"Viele Emojis ({emoji_count})")
+        
+        if has_money:
+            spam_score += 1
+            indicators.append("Geld-Symbole")
+        
+        if len(spam_words) >= 4:
+            spam_score += 1
+            indicators.append(f"Spam-Keywords ({len(spam_words)})")
+        
+        if has_url:
+            spam_score += 1
+            indicators.append("Links")
+        
+        if words > 50:
+            spam_score += 1
+            indicators.append(f"Sehr lang ({words} Wörter)")
+        
+        if is_english and mentions:
+            spam_score += 1
+            indicators.append(f"Englisch + @mentions ({len(mentions)})")
+        
+        if spam_score >= 3:
+            return True, f"Multiple Spam-Indikatoren: {', '.join(indicators)}"
+        
+        return False, ""
+        
     except Exception as e:
-        logger.error(f"DB log error: {e}")
-    return False
+        logger.error(f"Spam detection error: {e}")
+        return False, f"Fehler bei Spam-Erkennung: {str(e)}"
 
-async def send_telegram_message(chat_id: int, text: str):
+async def log_spam_report(message_id: int, chat_id: int, user_id: int, username: str, 
+                         message: str, reason: str, action: str):
+    """Log spam detection to database"""
     try:
-        telegram_token = os.getenv("TELEGRAM_TOKEN")
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            await client.post(
-                f"https://api.telegram.org/bot{telegram_token}/sendMessage",
-                json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
-            )
-    except Exception as e:
-        logger.error(f"Message error: {e}")
-
-async def handle_stats_command(chat_id: int, user_id: int, command: str):
-    try:
-        if not is_admin_user(user_id):
-            await send_telegram_message(chat_id, 
-                f"❌ Nur Admin kann Statistiken abrufen.\n" +
-                f"Ihre User ID: `{user_id}`")
+        if not mongodb:
             return
-        
-        if command == "/stats":
-            stats = await get_today_stats()
             
-            db_status = "✅ MongoDB" if stats["source"] == "MongoDB" else "🔧 Live-Memory"
-            ai_status = "🤖 Aktiv" if AI_ENABLED else "❌ Deaktiviert"
-            
-            message = f"""📊 **AI-SPAM STATISTIKEN (Heute)**
-━━━━━━━━━━━━━━━━━━━━
-🚫 Spam blockiert: **{stats['spam_blocked']}**
-📈 Spam-Rate: **{stats['spam_rate']}%**
-💬 Nachrichten gesamt: **{stats['messages_total']}**
-
-🤖 **AI vs REGEL-SYSTEM**
-🧠 AI-Erkennungen: **{stats.get('ai_detections', 0)}**
-📋 Regel-Erkennungen: **{stats.get('rule_detections', 0)}**
-
-🔒 **CAPTCHA STATISTIKEN**
-✅ Erfolgreich verifiziert: **{stats['captcha_solved']}**
-❌ Fehlgeschlagen: **{stats['captcha_failed']}**
-
-✅ **Bot läuft perfekt!**
-💾 Datenbank: {db_status}
-🤖 AI-System: {ai_status}
-🛡️ CAPTCHA-Schutz: Aktiv"""
-            
-            await send_telegram_message(chat_id, message)
-        
-        elif command == "/help":
-            db_status = "✅ MongoDB" if mongodb_available else "🔧 Live"
-            ai_status = "🤖 Aktiv" if AI_ENABLED else "❌ Aus"
-            help_message = f"""🤖 **AI-SPAM-BOT BEFEHLE**
-━━━━━━━━━━━━━━━━━━━━
-📊 `/stats` - AI + Regel Statistiken
-❓ `/help` - Diese Hilfe
-
-👤 **Admin:** ✅ (User ID: {user_id})
-
-🛡️ **PREMIUM SCHUTZ-FEATURES:**
-• **🧠 AI-Spam Erkennung (OpenAI GPT-4o)**
-• **📊 Intelligent Scoring (1-10 Scale)**
-• **🎯 Context-Aware Analysis**
-• **💰 Financial Scam Detection**
-• **🔗 Suspicious URL Analysis**
-• **📹 Videos ohne Text blockieren**
-• **🖼️ Bilder ohne Beschreibung blockieren**
-• **🔒 CAPTCHA für neue User**
-• **📈 60+ Spam Keywords**
-
-💾 Datenbank: {db_status}
-🤖 AI-System: {ai_status}
-💡 Model: {OPENAI_MODEL}"""
-            await send_telegram_message(chat_id, help_message)
-    
+        report = {
+            "id": str(uuid.uuid4()),
+            "message_id": message_id,
+            "chat_id": chat_id,
+            "user_id": user_id,
+            "username": username,
+            "message": message[:500],  # Limit message length
+            "reason": reason,
+            "action_taken": action,
+            "timestamp": datetime.utcnow()
+        }
+        await mongodb.spam_reports.insert_one(report)
+        logger.info(f"Spam report logged: {username} - {reason}")
     except Exception as e:
-        logger.error(f"Command error: {e}")
-        # FIX: Send error message to user
-        try:
-            await send_telegram_message(chat_id, 
-                f"❌ **FEHLER beim Abrufen der Statistiken**\n\n"
-                f"🔧 Fehler: `{str(e)}`\n\n"
-                f"📊 MongoDB Status: {'✅ Verbunden' if mongodb_available else '❌ Nicht verbunden'}\n"
-                f"💾 MongoDB Object: {'✅ OK' if mongodb is not None else '❌ None'}\n\n"
-                f"Bitte Admin kontaktieren oder später erneut versuchen.")
-        except:
-            pass  # Wenn selbst die Fehlermeldung fehlschlägt, ignorieren
+        logger.error(f"Error logging spam report: {e}")
 
+# Database setup
 @app.on_event("startup")
 async def startup_db_client():
+    global bot, mongodb
     try:
-        # Setup MongoDB (with fallback)
-        await setup_mongodb()
+        # Initialize MongoDB
+        mongo_url = os.getenv("MONGO_URL")
+        if not mongo_url:
+            raise Exception("MONGO_URL not found in environment variables")
         
-        # Start Telegram polling
-        asyncio.create_task(polling_loop())
-        logger.info("🚀 Bot started with robust MongoDB handling!")
+        client = AsyncIOMotorClient(mongo_url)
+        mongodb = client.telegram_spam_bot
+        
+        # Test connection
+        await client.admin.command('ping')
+        logger.info("✅ MongoDB connected successfully")
+        
+        # Initialize Telegram Bot
+        from telegram import Bot
+        telegram_token = os.getenv("TELEGRAM_TOKEN")
+        if not telegram_token:
+            raise Exception("TELEGRAM_TOKEN not found in environment variables")
+            
+        bot = Bot(token=telegram_token)
+        
+        # Test bot connection
+        bot_info = await bot.get_me()
+        logger.info(f"✅ Telegram Bot connected: @{bot_info.username}")
         
     except Exception as e:
-        logger.error(f"Startup error: {e}")
+        logger.error(f"❌ Startup error: {e}")
+        raise
 
-@app.get("/")
-async def root():
-    return {
-        "message": "🤖 @manuschatbot läuft PERFEKT mit CAPTCHA!",
-        "version": "5.4.0",
-        "admin_user": "539342443",
-        "status": "healthy",
-        "mongodb_available": mongodb_available,
-        "mongodb_connected": mongodb is not None,
-        "mongodb_client_alive": mongodb_client is not None,
-        "features": ["Spam Detection", "CAPTCHA System", "Admin Commands", "Channel Message Detection", "Aggressive Scam Detection", "Stats Fix v5.4"]
-    }
+@app.on_event("shutdown")
+async def shutdown_db_client():
+    if mongodb:
+        mongodb.client.close()
 
+# API Routes
 @app.get("/api/health")
 async def health_check():
-    stats = await get_today_stats()
-    return {
-        "status": "healthy",
-        "admin_user": "539342443",
-        "telegram_bot": "@manuschatbot",
-        "mongodb_available": mongodb_available,
-        "mongodb_connected": mongodb is not None,
-        "mongodb_client_alive": mongodb_client is not None,
-        "captcha_enabled": True,
-        "stats": stats,
-        "timestamp": datetime.utcnow()
-    }
+    """Health check endpoint"""
+    try:
+        if mongodb is None:
+            raise Exception("Database not connected")
+        await mongodb.client.admin.command('ping')
+        
+        if bot is None:
+            raise Exception("Bot not initialized")
+        bot_info = await bot.get_me()
+        
+        return {
+            "status": "healthy",
+            "database": "connected",
+            "telegram_bot": f"@{bot_info.username}",
+            "timestamp": datetime.utcnow()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Health check failed: {str(e)}")
 
-async def polling_loop():
-    telegram_token = os.getenv("TELEGRAM_TOKEN")
-    if not telegram_token:
-        logger.error("❌ No TELEGRAM_TOKEN!")
-        return
-    
-    offset = 0
-    logger.info("🔄 Polling started...")
-    
-    while True:
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(
-                    f"https://api.telegram.org/bot{telegram_token}/getUpdates",
-                    params={"offset": offset, "limit": 10, "timeout": 25}
-                )
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    if data["ok"]:
-                        for update in data["result"]:
-                            offset = max(offset, update["update_id"] + 1)
-                            if "message" in update:
-                                await process_message(update["message"])
-                
-        except Exception as e:
-            logger.error(f"Polling: {e}")
-            await asyncio.sleep(5)
-        await asyncio.sleep(1)
+@app.get("/api/stats")
+async def get_bot_stats():
+    """Get bot statistics"""
+    try:
+        if not mongodb:
+            raise HTTPException(status_code=500, detail="Database not connected")
+            
+        today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        yesterday = datetime.utcnow() - timedelta(days=1)
+        
+        # Count statistics
+        spam_today = await mongodb.spam_reports.count_documents({"timestamp": {"$gte": today}})
+        total_spam = await mongodb.spam_reports.count_documents({})
+        messages_today = await mongodb.messages.count_documents({"timestamp": {"$gte": today}})
+        total_messages = await mongodb.messages.count_documents({})
+        active_users = await mongodb.users.count_documents({"join_time": {"$gte": yesterday}})
+        
+        spam_rate = round((spam_today / max(messages_today, 1)) * 100, 2)
+        
+        return {
+            "spam_today": spam_today,
+            "total_spam": total_spam,
+            "messages_today": messages_today,
+            "total_messages": total_messages,
+            "active_users": active_users,
+            "spam_rate": spam_rate,
+            "timestamp": datetime.utcnow()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch stats: {str(e)}")
+
+@app.get("/api/spam-reports")
+async def get_spam_reports(limit: int = 50):
+    """Get recent spam reports"""
+    try:
+        if not mongodb:
+            raise HTTPException(status_code=500, detail="Database not connected")
+            
+        reports = await mongodb.spam_reports.find().sort("timestamp", -1).limit(limit).to_list(length=limit)
+        return {"reports": reports, "count": len(reports)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch reports: {str(e)}")
+
+@app.post("/api/test-spam")
+async def test_spam_detection(request: TestSpamRequest):
+    """Test spam detection on a message"""
+    try:
+        # Test with dummy user (new user for testing)
+        is_spam, reason = await is_spam_message(request.message, 12345, -1001234567890, request.has_media)
+        
+        # Additional analysis
+        language = detect_language(request.message) if request.message else "none"
+        has_url = has_links(request.message)
+        has_suspicious_url = has_suspicious_links(request.message)
+        spam_words = contains_spam_keywords(request.message)
+        words = word_count(request.message)
+        emoji_count = count_emojis(request.message)
+        has_money = has_money_symbols(request.message)
+        mentions = has_mentions(request.message)
+        
+        return {
+            "message": request.message,
+            "has_media": request.has_media,
+            "is_spam": is_spam,
+            "reason": reason,
+            "analysis": {
+                "language": language,
+                "has_links": has_url,
+                "has_suspicious_links": has_suspicious_url,
+                "spam_keywords": spam_words,
+                "mentions": mentions,
+                "word_count": words,
+                "emoji_count": emoji_count,
+                "has_money_symbols": has_money
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Test failed: {str(e)}")
+
+# Telegram webhook handler
+@app.post("/api/telegram-webhook")
+async def telegram_webhook_handler(request: Request):
+    """Handle incoming Telegram updates via webhook"""
+    try:
+        update_data = await request.json()
+        logger.info(f"📨 Received webhook update")
+        
+        if 'message' in update_data:
+            await process_message(update_data['message'])
+        
+        return {"status": "ok", "processed": True}
+        
+    except Exception as e:
+        logger.error(f"❌ Webhook error: {e}")
+        return {"status": "error", "error": str(e)}
 
 async def process_message(message_data: Dict[str, Any]):
-    global fallback_stats
+    """Process incoming message for spam detection"""
     try:
+        # Extract message information
         chat_id = message_data['chat']['id']
         user_id = message_data['from']['id']
         username = message_data['from'].get('username', f"user_{user_id}")
         message_text = message_data.get('text') or message_data.get('caption', '')
         message_id = message_data['message_id']
         
-        # ✅ CRITICAL FIX: COMMANDS FIRST - VOR ALLEN ANDEREN CHECKS!
-        # Commands müssen IMMER funktionieren, egal ob Channel, Group, etc.
-        if message_text and message_text.startswith('/'):
-            command = message_text.split()[0].lower()
-            if command in ['/stats', '/help']:
-                logger.info(f"📊 {command} from @{username} (ID: {user_id}) in chat {chat_id}")
-                await handle_stats_command(chat_id, user_id, command)
-                return  # ✅ SOFORT RETURN - keine weiteren Checks!
+        # Check if message has media
+        has_media = bool(
+            message_data.get('photo') or message_data.get('video') or 
+            message_data.get('document') or message_data.get('sticker') or
+            message_data.get('animation') or message_data.get('voice') or
+            message_data.get('audio')
+        )
         
-        # Jetzt erst Bot-Check
+        # Skip bot messages
         if message_data['from'].get('is_bot'):
             return
         
-        # CRITICAL: Check if message is from a CHANNEL (sender_chat field)
-        # When a channel posts to a linked discussion group, it has 'sender_chat'
-        sender_chat = message_data.get('sender_chat')
-        if sender_chat:
-            sender_chat_type = sender_chat.get('type', '')
-            sender_chat_title = sender_chat.get('title', 'Unknown')
-            sender_chat_id = sender_chat.get('id', 0)
-            logger.warning(f"📢 KANAL-NACHRICHT ERKANNT: Von '{sender_chat_title}' (Type: {sender_chat_type}, ID: {sender_chat_id}) - WIRD ÜBERSPRUNGEN!")
-            return
+        logger.info(f"📝 Processing message from @{username}: {message_text[:50]}...")
         
-        # MULTIPLE CHANNEL CHECKS - Skip processing for channels
-        chat_type = message_data['chat'].get('type', 'private')
-        chat_title = message_data['chat'].get('title', 'Unknown')
+        # Check for spam
+        is_spam, reason = await is_spam_message(message_text, user_id, chat_id, has_media)
         
-        # Skip ALL channel types
-        if chat_type in ['channel', 'supergroup_channel']:
-            logger.warning(f"⚠️ CHANNEL DETECTED: {chat_type} ({chat_title}) - SKIPPING ALL PROCESSING")
-            return
-            
-        # Skip if chat_id is negative and looks like channel (channels usually have very negative IDs)
-        if chat_id < -1000000000000:  # Channel ID pattern
-            logger.warning(f"⚠️ CHANNEL ID PATTERN DETECTED: {chat_id} - SKIPPING PROCESSING")
-            return
-        
-        # Additional safety: Skip if from user has no username and looks like channel
-        if not username and message_data['chat'].get('type') != 'private':
-            logger.warning(f"⚠️ SUSPICIOUS CHAT TYPE: {chat_type} - SKIPPING")
-            return
-        
-        # Only process GROUPS and SUPERGROUPS
-        if chat_type not in ['group', 'supergroup']:
-            logger.warning(f"⚠️ NOT A GROUP: {chat_type} - SKIPPING")
-            return
-        
-        logger.info(f"✅ Processing GROUP message: {chat_type} from @{username}")
-        
-        # Count message (fallback)
-        reset_daily_fallback()
-        fallback_stats["messages_today"] += 1
-        
-        # Skip if admin user (YOU) - Admin messages are NOT spam-checked, but commands work!
-        if is_admin_user(user_id):
-            logger.info(f"✅ Admin user @{username} - SKIPPING SPAM CHECK")
-            return
-        
-        # Check if user is verified
-        is_verified = await is_user_verified(user_id, chat_id)
-        
-        if not is_verified:
-            # User is not verified - handle CAPTCHA
-            user_key = f"{chat_id}_{user_id}"
-            
-            if user_key in user_verification and not user_verification[user_key].get("verified", False):
-                # User has pending CAPTCHA - check answer
-                if message_text:
-                    # Delete their message first
-                    await delete_message(chat_id, message_id)
-                    
-                    # Check if it's correct CAPTCHA answer
-                    is_correct = await check_captcha_answer(user_id, chat_id, username, message_text)
-                    if is_correct:
-                        # User is now verified, process normally
-                        return
-                    else:
-                        # Wrong answer, CAPTCHA sent again or user kicked
-                        return
-                else:
-                    # Non-text message from unverified user
-                    await delete_message(chat_id, message_id)
-                    await send_captcha(chat_id, user_id, username)
-                    return
-            else:
-                # First message from new user - send CAPTCHA
-                await delete_message(chat_id, message_id)
-                await send_captcha(chat_id, user_id, username)
-                logger.info(f"🔒 CAPTCHA sent to new user: @{username} (ID: {user_id})")
-                return
-        
-        # User is verified - HYBRID AI + RULE-BASED spam detection
-        if message_text:
-            # Get basic analysis first
-            spam_words = contains_spam_keywords(message_text)
-            has_suspicious = has_suspicious_links(message_text)
-            emoji_count = count_emojis(message_text)
-            has_money_symbols_detected = has_money_symbols(message_text)
-            has_promo_pattern = has_promo_code_pattern(message_text)
-            words_total = word_count(message_text)
-            has_url_links = has_links(message_text)
-            
-            is_spam = False
-            reason = ""
-            detection_method = "rule"
-            ai_analysis = None
-            
-            # RULE-BASED DETECTION (Fast check first) - V5.2 ENHANCED
-            if has_suspicious:
-                is_spam = True
-                reason = "Verdächtige URL erkannt"
-            elif len(spam_words) >= 3:
-                is_spam = True
-                reason = f"Spam Keywords: {', '.join(spam_words[:3])}"
-            elif has_promo_pattern and has_url_links:
-                is_spam = True
-                reason = "Promo-Code + Link erkannt (klassischer Scam)"
-            elif has_money_symbols_detected and has_url_links and emoji_count > 2:
-                is_spam = True
-                reason = "Geld-Symbole + Links + Emojis (klassischer Scam)"
-            elif has_money_symbols_detected and len(spam_words) >= 2:
-                is_spam = True
-                reason = "Geld-Symbole + Spam-Keywords (Finanz-Scam)"
-            
-            # AI ANALYSIS (For uncertain cases)
-            if not is_spam and should_use_ai_analysis(message_text, has_url_links, emoji_count, spam_words):
-                logger.info(f"🤖 AI analysis for suspicious message from @{username}")
-                ai_analysis = await analyze_message_with_ai(message_text, username, "German Telegram group")
-                
-                if ai_analysis and ai_analysis.get("ai_score", 0) >= AI_SPAM_THRESHOLD:
-                    is_spam = True
-                    reason = f"AI-Erkennung (Score: {ai_analysis.get('ai_score')}/10) - {ai_analysis.get('ai_reason', 'AI-Analyse')}"
-                    detection_method = "ai"
-                    
-                    # Track AI detection
-                    reset_daily_fallback()
-                    fallback_stats["ai_detections_today"] += 1
-                    
-                    logger.warning(f"🤖 AI SPAM: @{username} - Score: {ai_analysis.get('ai_score')}/10")
-            elif is_spam:
-                # Track rule-based detection
-                reset_daily_fallback()
-                fallback_stats["rule_detections_today"] += 1
-                
-            if is_spam:
-                fallback_stats["spam_blocked_today"] += 1
-                logger.warning(f"🚫 SPAM ({detection_method.upper()}): @{username} - {reason}")
-                await handle_spam(chat_id, message_id, user_id, username, reason)
-                
-                # Enhanced logging with AI data
-                spam_log = {
-                    "id": str(uuid.uuid4()),
-                    "message_id": message_id,
-                    "chat_id": chat_id,
-                    "user_id": user_id,
-                    "username": username,
-                    "reason": reason,
-                    "detection_method": detection_method,
-                    "message_preview": message_text[:200],
-                    "emoji_count": emoji_count,
-                    "spam_keywords": spam_words,
-                    "has_money_symbols": has_money_symbols_detected,
-                    "has_links": has_url_links,
-                    "timestamp": datetime.utcnow()
-                }
-                
-                # Add AI analysis data if available
-                if ai_analysis:
-                    spam_log.update({
-                        "ai_score": ai_analysis.get("ai_score", 0),
-                        "ai_confidence": ai_analysis.get("confidence", 0),
-                        "ai_patterns": ai_analysis.get("detected_patterns", []),
-                        "ai_reason": ai_analysis.get("ai_reason", "")
-                    })
-                
-                await log_to_db("spam_reports", spam_log)
-                return
-        
-        # Check for MEDIA SPAM (Videos/Images without text)
-        has_video = bool(message_data.get('video') or message_data.get('video_note'))
-        has_image = bool(message_data.get('photo'))
-        has_document = bool(message_data.get('document'))
-        has_animation = bool(message_data.get('animation'))
-        has_sticker = bool(message_data.get('sticker'))
-        
-        # Media without text or caption = SPAM
-        if (has_video or has_image or has_document or has_animation or has_sticker) and not message_text:
-            is_spam = True
-            media_type = ""
-            if has_video: media_type = "Video"
-            elif has_image: media_type = "Bild" 
-            elif has_document: media_type = "Dokument"
-            elif has_animation: media_type = "GIF/Animation"
-            elif has_sticker: media_type = "Sticker"
-            
-            reason = f"{media_type} ohne Text/Beschreibung"
-            
-            fallback_stats["spam_blocked_today"] += 1
-            logger.warning(f"🚫 MEDIA SPAM: @{username} - {reason}")
+        if is_spam:
+            logger.warning(f"🚫 SPAM DETECTED from @{username}: {reason}")
             await handle_spam(chat_id, message_id, user_id, username, reason)
-            
-            # Log media spam to DB
-            await log_to_db("spam_reports", {
+        
+        # Log message
+        if mongodb:
+            await mongodb.messages.insert_one({
                 "id": str(uuid.uuid4()),
                 "message_id": message_id,
                 "chat_id": chat_id,
                 "user_id": user_id,
                 "username": username,
-                "reason": reason,
-                "media_type": media_type,
-                "timestamp": datetime.utcnow()
-            })
-            return
-            
-        # Log normal message to DB (if available)
-        if message_text or has_video or has_image:  # Log all messages with content
-            await log_to_db("messages", {
-                "id": str(uuid.uuid4()),
-                "message_id": message_id,
-                "chat_id": chat_id,
-                "user_id": user_id,
-                "username": username,
-                "message": message_text[:500] if message_text else "[MEDIA]",
-                "has_media": has_video or has_image or has_document or has_animation,
-                "media_type": media_type if (has_video or has_image or has_document or has_animation) else None,
+                "message": message_text[:500],
+                "has_media": has_media,
                 "timestamp": datetime.utcnow(),
-                "is_spam": False,
-                "spam_reason": None,
-                "user_verified": True
+                "is_spam": is_spam,
+                "spam_reason": reason if is_spam else None
             })
         
     except Exception as e:
-        logger.error(f"Processing: {e}")
-
-async def delete_message(chat_id: int, message_id: int):
-    """Delete a message"""
-    try:
-        telegram_token = os.getenv("TELEGRAM_TOKEN")
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            await client.post(
-                f"https://api.telegram.org/bot{telegram_token}/deleteMessage",
-                json={"chat_id": chat_id, "message_id": message_id}
-            )
-    except Exception as e:
-        logger.error(f"Error deleting message: {e}")
+        logger.error(f"❌ Message processing error: {e}")
 
 async def handle_spam(chat_id: int, message_id: int, user_id: int, username: str, reason: str):
+    """Handle spam message - delete, kick, notify"""
+    actions_taken = []
+    
     try:
         telegram_token = os.getenv("TELEGRAM_TOKEN")
+        base_url = f"https://api.telegram.org/bot{telegram_token}"
+        
         async with httpx.AsyncClient(timeout=10.0) as client:
             # Delete message
-            await client.post(
-                f"https://api.telegram.org/bot{telegram_token}/deleteMessage",
+            delete_response = await client.post(
+                f"{base_url}/deleteMessage",
                 json={"chat_id": chat_id, "message_id": message_id}
             )
-            # Send notification  
-            await client.post(
-                f"https://api.telegram.org/bot{telegram_token}/sendMessage",
-                json={"chat_id": chat_id, "text": f"🚫 Spam blockiert!\n👤 @{username}\n📋 {reason}"}
-            )
+            if delete_response.status_code == 200:
+                actions_taken.append("message_deleted")
+                logger.info(f"🗑️ Message {message_id} deleted")
+            
+            # Handle different types of spam differently
+            if "Medien-Beschränkung" in reason:
+                # Don't kick for media restrictions, just inform
+                notification = f"📷 @{username}, Bilder können erst nach 10 Tagen Mitgliedschaft gesendet werden."
+                actions_taken.append("media_warning")
+            else:
+                # Kick user for other spam
+                ban_response = await client.post(
+                    f"{base_url}/banChatMember",
+                    json={"chat_id": chat_id, "user_id": user_id}
+                )
+                if ban_response.status_code == 200:
+                    actions_taken.append("user_banned")
+                    logger.info(f"👤 User {user_id} banned")
                 
-        logger.info(f"✅ Spam handled: @{username}")
+                # Unban to allow rejoining
+                await client.post(
+                    f"{base_url}/unbanChatMember",
+                    json={"chat_id": chat_id, "user_id": user_id}
+                )
+                actions_taken.append("user_unbanned")
+                
+                notification = f"🚫 Spam blockiert!\
+👤 @{username}\
+📋 {reason}"
+            
+            # Send notification
+            await client.post(
+                f"{base_url}/sendMessage",
+                json={"chat_id": chat_id, "text": notification}
+            )
+            actions_taken.append("notification_sent")
+        
+        # Log spam report
+        await log_spam_report(
+            message_id, chat_id, user_id, username,
+            "", reason, ", ".join(actions_taken)
+        )
+        
+        logger.info(f"✅ Spam handled successfully: {', '.join(actions_taken)}")
         
     except Exception as e:
-        logger.error(f"Spam handling: {e}")
+        logger.error(f"❌ Spam handling error: {e}")
+        actions_taken.append(f"error: {str(e)}")
+
+# Webhook management
+@app.post("/api/set-webhook")
+async def set_webhook():
+    """Set Telegram webhook"""
+    try:
+        webhook_url = "https://your-domain.com/api/telegram-webhook"  # CHANGE THIS TO YOUR DOMAIN
+        telegram_token = os.getenv("TELEGRAM_TOKEN")
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"https://api.telegram.org/bot{telegram_token}/setWebhook",
+                json={"url": webhook_url}
+            )
+            result = response.json()
+        
+        return {
+            "status": "success",
+            "webhook_url": webhook_url,
+            "telegram_response": result
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to set webhook: {str(e)}")
+
+@app.get("/api/webhook-status")
+async def get_webhook_status():
+    """Get current webhook status"""
+    try:
+        telegram_token = os.getenv("TELEGRAM_TOKEN")
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"https://api.telegram.org/bot{telegram_token}/getWebhookInfo"
+            )
+            result = response.json()
+        
+        return {"status": "success", "webhook_info": result["result"]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get webhook status: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=8001)
+
+
+# =============================================================================
+# INSTALLATION UND SETUP ANLEITUNG
+# =============================================================================
+
+"""
+1. REQUIREMENTS INSTALLATION:
+pip install fastapi uvicorn python-multipart httpx motor pymongo python-telegram-bot emoji langdetect python-dotenv
+
+2. ENVIRONMENT VARIABLEN (.env Datei erstellen):
+MONGO_URL=mongodb://localhost:27017/
+TELEGRAM_TOKEN=YOUR_BOT_TOKEN_FROM_BOTFATHER
+WEBHOOK_SECRET=your_secure_random_string
+
+3. BOT SETUP BEI BOTFATHER:
+- Gehe zu @BotFather in Telegram
+- /newbot → Bot erstellen
+- Token kopieren und in .env einfügen
+- /mybots → Dein Bot → Bot Settings → Group Privacy → Disable
+
+4. WEBHOOK EINRICHTEN:
+- Domain/Server mit HTTPS benötigt
+- Webhook-URL in set_webhook() Funktion ändern
+- API aufrufen: POST /api/set-webhook
+
+5. BOT ZU CHAT HINZUFÜGEN:
+- Bot zu gewünschtem Chat hinzufügen
+- Admin-Rechte geben:
+  * Nachrichten löschen
+  * Benutzer verwalten
+  * Alle Nachrichten lesen
+
+6. MONGODB SETUP:
+- MongoDB installieren und starten
+- Datenbank wird automatisch erstellt
+
+7. SERVER STARTEN:
+python server.py
+
+8. TESTEN:
+- POST /api/test-spam → Spam-Erkennung testen
+- GET /api/health → Bot-Status prüfen
+- GET /api/stats → Statistiken abrufen
+
+SPAM-ERKENNUNGS-REGELN:
+✅ Neue Benutzer: Max 3 Emojis, max 20 Wörter
+✅ Medien: Nur nach 10 Tagen Mitgliedschaft
+✅ Verdächtige URLs: bit.ly, tinyurl.com, clk.li etc.
+✅ Casino-Scams: JETLUXE, VEXWAY mit Geld-Symbolen
+✅ Token-Scams: Axiom, Airdrop, Claim mit @mentions
+✅ Multiple Indikatoren: >3 Spam-Signale = Blockierung
+
+Der Bot löscht automatisch Spam-Nachrichten, kickt Benutzer und sendet Benachrichtigungen.
+"""
