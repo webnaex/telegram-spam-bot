@@ -1,5 +1,5 @@
 """
-Telegram Bot Command Handlers2
+Telegram Bot Command Handlers
 """
 import logging
 from datetime import datetime
