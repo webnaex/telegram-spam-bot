@@ -1,5 +1,7 @@
 # Railway Telegram Anti-Spam Bot mit AI-POWERED Detection
-# Version 5.3 - AI + CAPTCHA + Enhanced Protection + Channel Message Detection + Aggressive Scam Detection
+# Version 5.4 - STATS FIX + AI + CAPTCHA + Enhanced Protection
+# FIX: MongoDB Stats funktionieren wieder (Client wird jetzt korrekt gespeichert)
+# FIX: Error Handling mit User-Feedback bei /stats Fehlern
 # FIX: Erkennt jetzt Kanal-Nachrichten in verknüpften Diskussionsgruppen (sender_chat)
 # FIX: Admin kann jetzt /stats und /help Befehle nutzen (Commands vor Admin-Check)
 # NEW: Verbesserte Promo-Code Erkennung, niedrigere Emoji-Schwelle, mehr Scam-Keywords
@@ -21,9 +23,10 @@ from datetime import datetime, timedelta
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="AI-Powered Telegram Anti-Spam Bot", version="5.0.0")
+app = FastAPI(title="AI-Powered Telegram Anti-Spam Bot", version="5.4.0")
 
 # Global variables
+mongodb_client = None  # FIX: Client muss global gespeichert werden!
 mongodb = None
 mongodb_available = False
 
@@ -434,8 +437,10 @@ def reset_daily_fallback():
 
 async def get_today_stats():
     """Get today's statistics - MongoDB first, fallback second"""
+    logger.info(f"📊 Stats request - MongoDB available: {mongodb_available}, MongoDB object: {mongodb is not None}")
     try:
         if mongodb_available and mongodb is not None:
+            logger.info("📊 Fetching stats from MongoDB...")
             # Try MongoDB first
             today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
             spam_today = await mongodb.spam_reports.count_documents({"timestamp": {"$gte": today}})
@@ -451,6 +456,7 @@ async def get_today_stats():
             
             spam_rate = round((spam_today / max(messages_today, 1)) * 100, 1) if messages_today > 0 else 0
             
+            logger.info(f"✅ MongoDB stats retrieved: {spam_today} spam, {messages_today} messages")
             return {
                 "spam_blocked": spam_today,
                 "messages_total": messages_today,
@@ -462,9 +468,12 @@ async def get_today_stats():
                 "source": "MongoDB"
             }
     except Exception as e:
-        logger.error(f"MongoDB stats error: {e}")
+        logger.error(f"❌ MongoDB stats error: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
     
     # Fallback to memory stats
+    logger.warning("⚠️ Using fallback memory stats")
     reset_daily_fallback()
     spam_rate = round((fallback_stats["spam_blocked_today"] / max(fallback_stats["messages_today"], 1)) * 100, 1)
     
@@ -481,7 +490,7 @@ async def get_today_stats():
 
 async def setup_mongodb():
     """Robuste MongoDB Setup mit mehreren URLs"""
-    global mongodb, mongodb_available
+    global mongodb, mongodb_available, mongodb_client
     
     # Alle möglichen MongoDB URLs probieren
     possible_urls = [
@@ -501,12 +510,17 @@ async def setup_mongodb():
             
             from motor.motor_asyncio import AsyncIOMotorClient
             client = AsyncIOMotorClient(url, serverSelectionTimeoutMS=5000)
-            mongodb = client.telegram_spam_bot
             
-            # Test connection
+            # Test connection BEFORE setting globals
             await client.admin.command('ping')
+            
+            # Connection successful - NOW set globals
+            mongodb_client = client
+            mongodb = client.telegram_spam_bot
             mongodb_available = True
+            
             logger.info(f"✅ MongoDB connected successfully!")
+            logger.info(f"✅ Client: {mongodb_client is not None}, DB: {mongodb is not None}")
             return True
             
         except Exception as e:
@@ -601,6 +615,13 @@ async def handle_stats_command(chat_id: int, user_id: int, command: str):
     
     except Exception as e:
         logger.error(f"Command error: {e}")
+        # FIX: Send error message to user
+        await send_telegram_message(chat_id, 
+            f"❌ **FEHLER beim Abrufen der Statistiken**\n\n"
+            f"🔧 Fehler: `{str(e)}`\n\n"
+            f"📊 MongoDB Status: {'✅ Verbunden' if mongodb_available else '❌ Nicht verbunden'}\n"
+            f"💾 MongoDB Object: {'✅ OK' if mongodb is not None else '❌ None'}\n\n"
+            f"Bitte Admin kontaktieren oder später erneut versuchen.")
 
 @app.on_event("startup")
 async def startup_db_client():
@@ -619,11 +640,13 @@ async def startup_db_client():
 async def root():
     return {
         "message": "🤖 @manuschatbot läuft PERFEKT mit CAPTCHA!",
-        "version": "5.3.0",
+        "version": "5.4.0",
         "admin_user": "539342443",
         "status": "healthy",
         "mongodb_available": mongodb_available,
-        "features": ["Spam Detection", "CAPTCHA System", "Admin Commands", "Channel Message Detection", "Aggressive Scam Detection"]
+        "mongodb_connected": mongodb is not None,
+        "mongodb_client_alive": mongodb_client is not None,
+        "features": ["Spam Detection", "CAPTCHA System", "Admin Commands", "Channel Message Detection", "Aggressive Scam Detection", "Stats Fix"]
     }
 
 @app.get("/api/health")
@@ -634,6 +657,8 @@ async def health_check():
         "admin_user": "539342443",
         "telegram_bot": "@manuschatbot",
         "mongodb_available": mongodb_available,
+        "mongodb_connected": mongodb is not None,
+        "mongodb_client_alive": mongodb_client is not None,
         "captcha_enabled": True,
         "stats": stats,
         "timestamp": datetime.utcnow()
