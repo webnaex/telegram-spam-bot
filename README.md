@@ -2,7 +2,7 @@
 
 Ein moderner, leistungsstarker Telegram-Bot zum Schutz von Gruppen vor Spam-Nachrichten.
 
-## ✨ Features
+## ✨ Features Test
 
 ### 🛡️ Spam-Erkennung
 - **Keyword-basierte Filterung**: Erkennt über 60 Spam-Keywords (Crypto, Casino, Scams)
